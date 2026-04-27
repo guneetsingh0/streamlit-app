@@ -945,7 +945,7 @@ with st.sidebar:
 
     st.markdown("""
     <div style="position:absolute;bottom:20px;left:20px;font-size:0.65em;color:#0f2535;">
-        Asrith Maruvada · Beta
+        Guneet Singh · Beta
     </div>
     """, unsafe_allow_html=True)
 
@@ -1515,6 +1515,6 @@ elif page == "About":
     st.markdown("---")
     st.markdown("""
     <div style="text-align:center;font-size:0.65em;color:#0f2535;padding:10px 0;">
-        SUTERUP V5.0 · Surgical Suture Training Platform · Asrith Maruvada · Beta
+        SUTERUP V5.0 · Surgical Suture Training Platform · Guneet Singh · Beta
     </div>
     """, unsafe_allow_html=True)
