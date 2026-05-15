@@ -1,528 +1,458 @@
 """
-╔══════════════════════════════════════════════════════════════════════════╗
-║  SUTERUP V5.0 — Surgical Suture Training Platform                        ║
-║  Streamlit · Live Camera · Auto-HSV AI · Real-time Feedback              ║
-║  Programmer: Guneet Singh                                                ║
-╚══════════════════════════════════════════════════════════════════════════╝
+SUTERUP V5.1 — Surgical Suture Training Platform
+Programmer: Guneet Singh
 
-INSTALL (one-time):
-    pip install streamlit opencv-python numpy pillow
+INSTALL:
+    pip install streamlit opencv-python numpy pillow pandas
 
 RUN:
     streamlit run suterup_v5.py
 
-Then open http://localhost:8501 in your browser.
-Allow camera access when prompted by the browser.
+CAMERA MODES (Live Training page):
+    Snapshot Mode  — take one picture, get instant analysis
+    Live Mode      — continuous auto-refresh loop, real-time feedback
 
-PAGES (via sidebar):
-    • Live Training   — camera feed + real-time AI analysis
-    • Session History — logged stitches, charts, run summaries
-    • Calibration     — manual HSV controls + diagnostic mask view
-    • About           — tech guide, tips, scoring rubric
-
-WHAT'S NEW IN V5 vs V4:
-    - Migrated from Gradio → Streamlit (runs in any browser, no install needed for users)
-    - Multi-page navigation via sidebar
-    - Live camera via Streamlit's st.camera_input (snapshot-on-change, browser native)
-    - Continuous "Live Mode" auto-refresh loop using st.rerun()
-    - Auto-HSV with visual HSV mask overlay so users can SEE what AI detected
-    - Calibration page shows the raw mask preview + sliders side-by-side
-    - Session history page with bar charts (st.bar_chart) for score trends
-    - Dark surgical UI via custom CSS injected through st.markdown
-    - Error guards on every camera/CV operation
-    - Temporal smoothing preserved from V4
-    - All free, no API keys, no paid services
+PAGES:
+    Live Training   — camera + analysis
+    Session History — run summaries, score chart, event log
+    Calibration     — manual HSV sliders + mask preview
+    About           — scoring rubric, tech stack
 """
 
-import streamlit as st          # core framework — web UI, state, routing
-import cv2                      # OpenCV — image processing, HSV masking, contours
-import numpy as np              # numerical arrays — pixel math
-import math                     # sqrt, pi — geometric calculations
-import json                     # export session data to JSON
-import time                     # timestamps, sleep
-from datetime import datetime   # human-readable timestamps
-from collections import deque   # fixed-length smoothing buffer
-from PIL import Image           # convert between PIL and numpy for Streamlit camera
-import io                       # byte buffers for image encoding
+import streamlit as st
+import cv2
+import numpy as np
+import math
+import json
+import time
+from datetime import datetime
+from collections import deque
+from PIL import Image
+import io
 
 # ─────────────────────────────────────────────────────
-#  PAGE CONFIG — must be first Streamlit call
+#  PAGE CONFIG
 # ─────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="Suterup — Surgical Training",  # browser tab title
-    page_icon="⚕",                             # favicon
-    layout="wide",                             # full-width layout
-    initial_sidebar_state="expanded",          # sidebar always open on load
+    page_title="Suterup",
+    page_icon="⚕",
+    layout="wide",
+    initial_sidebar_state="expanded",
 )
 
 # ─────────────────────────────────────────────────────
-#  DARK SURGICAL CSS INJECTION
-#  Streamlit renders everything inside an iframe; we inject
-#  a <style> block via st.markdown(unsafe_allow_html=True)
-#  to override default white theme without needing a config file.
+#  CSS — clean dark surgical UI, no gradients, no flash
 # ─────────────────────────────────────────────────────
-DARK_CSS = """
+CSS = """
 <style>
-/* ── Import display font (free via Google Fonts) ── */
-@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;600;700&family=Space+Grotesk:wght@400;600;700&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@300;400;500&family=DM+Sans:wght@400;500;600&display=swap');
 
-/* ── Global overrides ── */
-html, body, [class*="css"] {
-    background-color: #080e12 !important;
-    color: #c9d8e4 !important;
-    font-family: 'IBM Plex Mono', monospace !important;
+/* ── Base ── */
+html, body, [class*="css"], .stApp {
+    background: #0d1117 !important;
+    color: #cbd5e1 !important;
+    font-family: 'DM Mono', monospace !important;
 }
+
+/* Prevent any flash / white blink on load */
+.stApp { animation: none !important; transition: none !important; }
+
+/* ── Main content padding ── */
+.block-container { padding: 2rem 2.5rem 2rem 2.5rem !important; max-width: 1300px !important; }
 
 /* ── Sidebar ── */
 [data-testid="stSidebar"] {
-    background-color: #0b1520 !important;
-    border-right: 1px solid #1a3a55 !important;
+    background: #0a0f14 !important;
+    border-right: 1px solid #1e2d3d !important;
 }
-[data-testid="stSidebar"] * { color: #7aaac8 !important; }
-[data-testid="stSidebar"] .stRadio label { font-size: 0.85em !important; letter-spacing: 0.05em; }
+[data-testid="stSidebar"] * { color: #64829a !important; }
+[data-testid="stSidebar"] .stRadio label { font-size: 0.82em !important; }
 
-/* ── Buttons ── */
+/* ── Sidebar brand ── */
+.brand-title {
+    font-family: 'DM Sans', sans-serif !important;
+    font-weight: 600;
+    font-size: 1.3em;
+    color: #e2e8f0 !important;
+    letter-spacing: -0.01em;
+}
+.brand-sub {
+    font-size: 0.62em;
+    color: #2a4a5e !important;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+}
+
+/* ── Buttons — two variants ── */
 .stButton > button {
-    background: #0b1e2e !important;
-    border: 1px solid #1e6ea0 !important;
-    color: #5bc4f5 !important;
-    font-family: 'IBM Plex Mono', monospace !important;
-    font-size: 0.78em !important;
-    border-radius: 3px !important;
-    letter-spacing: 0.08em !important;
-    text-transform: uppercase !important;
-    transition: all 0.15s !important;
-    padding: 8px 16px !important;
+    background: #111927 !important;
+    border: 1px solid #1e3a4f !important;
+    color: #94b4c8 !important;
+    font-family: 'DM Mono', monospace !important;
+    font-size: 0.76em !important;
+    font-weight: 500 !important;
+    border-radius: 4px !important;
+    letter-spacing: 0.06em !important;
+    padding: 9px 18px !important;
+    transition: border-color 0.12s, color 0.12s !important;
+    box-shadow: none !important;
 }
 .stButton > button:hover {
-    background: #102840 !important;
-    border-color: #5bc4f5 !important;
+    border-color: #4a8aaa !important;
+    color: #c9dce8 !important;
+    background: #131e2a !important;
 }
 .stButton > button:disabled {
-    border-color: #1a2a3a !important;
-    color: #2a4a5a !important;
-    cursor: not-allowed !important;
+    border-color: #111820 !important;
+    color: #1e3040 !important;
 }
-
-/* ── Danger button override (red class via markdown trick) ── */
-.danger button {
-    border-color: #a03030 !important;
-    color: #f07070 !important;
+/* Active/recording state — applied via container div */
+.btn-active > .stButton > button {
+    border-color: #c0392b !important;
+    color: #e87070 !important;
 }
-
-/* ── Sliders ── */
-.stSlider [data-baseweb="slider"] { accent-color: #5bc4f5; }
-.stSlider label { color: #5aaabf !important; font-size: 0.75em !important; }
+.btn-primary > .stButton > button {
+    border-color: #2e6e8a !important;
+    color: #7ec8e3 !important;
+}
 
 /* ── Metrics ── */
 [data-testid="stMetric"] {
-    background: #0b1a28 !important;
-    border: 1px solid #1a3a55 !important;
+    background: #0f1923 !important;
+    border: 1px solid #1e2d3d !important;
     border-radius: 4px !important;
-    padding: 10px 14px !important;
+    padding: 12px 16px !important;
 }
-[data-testid="stMetricLabel"] { color: #4a8aaa !important; font-size: 0.72em !important; letter-spacing: 0.08em !important; }
-[data-testid="stMetricValue"] { color: #5bc4f5 !important; font-size: 1.4em !important; font-weight: 700 !important; }
+[data-testid="stMetricLabel"] {
+    color: #3a607a !important;
+    font-size: 0.68em !important;
+    letter-spacing: 0.1em !important;
+    text-transform: uppercase !important;
+}
+[data-testid="stMetricValue"] {
+    color: #c8dce8 !important;
+    font-size: 1.35em !important;
+    font-family: 'DM Sans', sans-serif !important;
+    font-weight: 600 !important;
+}
 [data-testid="stMetricDelta"] { font-size: 0.7em !important; }
 
-/* ── Text inputs ── */
-.stTextInput input, .stTextArea textarea {
-    background: #0b1a28 !important;
-    border: 1px solid #1a3a55 !important;
-    color: #c9d8e4 !important;
-    font-family: 'IBM Plex Mono', monospace !important;
-}
+/* ── Sliders ── */
+.stSlider > div { padding: 0 !important; }
+.stSlider label { color: #3a6070 !important; font-size: 0.72em !important; }
+input[type=range] { accent-color: #4a8aaa !important; }
 
 /* ── Expanders ── */
-.streamlit-expanderHeader {
-    background: #0b1a28 !important;
-    border: 1px solid #1a3a55 !important;
-    color: #5bc4f5 !important;
-    font-size: 0.82em !important;
+[data-testid="stExpander"] {
+    background: #0f1923 !important;
+    border: 1px solid #1e2d3d !important;
+    border-radius: 4px !important;
+}
+[data-testid="stExpander"] summary {
+    color: #4a7a8a !important;
+    font-size: 0.78em !important;
 }
 
-/* ── Info / warning boxes ── */
+/* ── Alerts (st.success / st.error / st.warning) ── */
 .stAlert {
-    background: #0b1a28 !important;
-    border: 1px solid #1a3a55 !important;
-    color: #7aaac8 !important;
+    background: #0f1923 !important;
+    border: 1px solid #1e2d3d !important;
+    border-radius: 4px !important;
+    font-size: 0.78em !important;
 }
+.stAlert p { color: #7aaac8 !important; }
 
-/* ── Dividers ── */
-hr { border-color: #1a3a55 !important; }
+/* ── Divider ── */
+hr { border: none !important; border-top: 1px solid #1a2a38 !important; margin: 16px 0 !important; }
 
 /* ── Camera widget ── */
-[data-testid="stCameraInput"] {
-    border: 1px solid #1a3a55 !important;
+[data-testid="stCameraInput"] video,
+[data-testid="stCameraInput"] img {
+    border: 1px solid #1e2d3d !important;
     border-radius: 4px !important;
 }
+[data-testid="stCameraInput"] label { display: none !important; }
+[data-testid="stCameraInput"] button {
+    background: #0f1923 !important;
+    border: 1px solid #1e3a4f !important;
+    color: #7aaac8 !important;
+    border-radius: 4px !important;
+    font-family: 'DM Mono', monospace !important;
+    font-size: 0.75em !important;
+}
 
-/* ── Images (annotated output) ── */
+/* ── Annotated image output ── */
 [data-testid="stImage"] img {
-    border: 1px solid #1a3a55 !important;
+    border: 1px solid #1e2d3d !important;
     border-radius: 4px !important;
+    display: block !important;
 }
 
-/* ── Sidebar radio selected ── */
-[data-testid="stSidebar"] .stRadio [aria-checked="true"] + span {
-    color: #5bc4f5 !important;
+/* ── Tabs ── */
+[data-testid="stTabs"] [role="tab"] {
+    font-size: 0.76em !important;
+    color: #3a6070 !important;
+    letter-spacing: 0.06em !important;
+    background: transparent !important;
+    border: none !important;
+    padding: 8px 14px !important;
+}
+[data-testid="stTabs"] [aria-selected="true"] {
+    color: #94b4c8 !important;
+    border-bottom: 1px solid #4a8aaa !important;
 }
 
-/* ── Section headers ── */
-.section-label {
-    font-family: 'Space Grotesk', sans-serif;
-    font-weight: 700;
-    font-size: 0.72em;
-    letter-spacing: 0.14em;
-    text-transform: uppercase;
-    color: #2a6a8a;
-    margin-bottom: 6px;
-}
-
-/* ── Status card ── */
-.status-card {
-    background: #0b1a28;
-    border: 1px solid #1a3a55;
-    border-radius: 4px;
-    padding: 14px 16px;
-    font-size: 0.82em;
-    line-height: 1.9;
-}
-
-/* ── Score bar ── */
-.score-bar-wrap {
-    background: #0a1520;
-    border-radius: 2px;
-    height: 6px;
-    width: 100%;
-    margin-top: 4px;
-}
-.score-bar-fill {
-    height: 6px;
-    border-radius: 2px;
-    transition: width 0.3s ease;
-}
-
-/* ── Log lines ── */
-.log-line {
-    font-size: 0.74em;
-    color: #5a8aaa;
-    border-bottom: 1px solid #0d1e2e;
-    padding: 3px 0;
-    line-height: 1.7;
-}
-
-/* ── Page header ── */
-.page-header {
-    font-family: 'Space Grotesk', sans-serif;
-    font-weight: 700;
-    font-size: 1.5em;
-    color: #5bc4f5;
-    letter-spacing: -0.02em;
-    margin-bottom: 4px;
+/* ── Custom HTML components ── */
+.page-title {
+    font-family: 'DM Sans', sans-serif;
+    font-size: 1.25em;
+    font-weight: 600;
+    color: #c8dce8;
+    letter-spacing: -0.01em;
+    margin-bottom: 2px;
 }
 .page-sub {
-    font-size: 0.73em;
-    color: #2a5a7a;
-    letter-spacing: 0.05em;
-    margin-bottom: 20px;
+    font-size: 0.68em;
+    color: #243545;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    margin-bottom: 22px;
 }
-
-/* ── Grade badge ── */
-.grade-optimal { color: #00e09a !important; }
-.grade-short   { color: #f5d05b !important; }
-.grade-wide    { color: #f5d05b !important; }
-.grade-danger  { color: #f07070 !important; }
-
-/* ── Scrollable log box ── */
-.log-scroll {
-    max-height: 320px;
+.section-label {
+    font-family: 'DM Sans', sans-serif;
+    font-size: 0.65em;
+    font-weight: 600;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: #243545;
+    margin-bottom: 8px;
+    margin-top: 4px;
+}
+.card {
+    background: #0f1923;
+    border: 1px solid #1e2d3d;
+    border-radius: 4px;
+    padding: 14px 16px;
+    font-size: 0.8em;
+    line-height: 1.85;
+}
+.mode-badge {
+    display: inline-block;
+    font-size: 0.65em;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    padding: 3px 8px;
+    border-radius: 2px;
+    margin-left: 8px;
+    vertical-align: middle;
+}
+.mode-snapshot { background: #0f1d28; color: #4a8aaa; border: 1px solid #1e3a50; }
+.mode-live     { background: #200f0f; color: #aa5a5a; border: 1px solid #4a1e1e; }
+.score-bar-bg {
+    background: #0a1018;
+    border-radius: 2px;
+    height: 4px;
+    width: 100%;
+    margin-top: 6px;
+    margin-bottom: 10px;
+}
+.score-bar-fill { height: 4px; border-radius: 2px; }
+.log-box {
+    max-height: 300px;
     overflow-y: auto;
-    background: #080e12;
-    border: 1px solid #1a3a55;
+    background: #080c10;
+    border: 1px solid #1a2838;
     border-radius: 4px;
     padding: 10px 12px;
 }
+.log-line {
+    font-size: 0.72em;
+    color: #3a6070;
+    border-bottom: 1px solid #0e1820;
+    padding: 3px 0;
+    line-height: 1.6;
+}
+.grade-optimal { color: #4db88a !important; }
+.grade-warn    { color: #c8a53a !important; }
+.grade-danger  { color: #b85a5a !important; }
+.status-indicator {
+    width: 7px; height: 7px;
+    border-radius: 50%;
+    display: inline-block;
+    margin-right: 6px;
+    vertical-align: middle;
+}
+.status-live    { background: #b85a5a; box-shadow: 0 0 4px #b85a5a88; }
+.status-standby { background: #2a4050; }
 </style>
 """
-st.markdown(DARK_CSS, unsafe_allow_html=True)   # inject CSS before anything else renders
+st.markdown(CSS, unsafe_allow_html=True)
 
 # ─────────────────────────────────────────────────────
-#  SESSION STATE INITIALISATION
-#  st.session_state persists across reruns (button clicks, camera updates)
-#  but resets when the browser tab refreshes.
+#  SESSION STATE
 # ─────────────────────────────────────────────────────
-def _init_state():
-    """Populate st.session_state with defaults on first load only."""
+def _init():
+    defaults = {
+        "hsv":              dict(h_min=90, h_max=130, s_min=80, s_max=255, v_min=50, v_max=255),
+        "area":             dict(min_area=200, max_area=8000),
+        "hsv_source":       "default",
+        "run_active":       False,
+        "run_stitches":     [],
+        "session_total":    0,
+        "log_lines":        [],
+        "run_history":      [],
+        "centroid_history": deque(maxlen=6),
+        "auto_hsv_result":  None,
+        # Camera mode: "snapshot" | "live"
+        "cam_mode":         "snapshot",
+        # Flag: live mode is actively looping
+        "live_running":     False,
+        # Cached last processed frame (BGR numpy)
+        "last_annotated":   None,
+        # Cached last centroids for log button
+        "last_centroids":   [],
+        "page":             "Live Training",
+    }
+    for k, v in defaults.items():
+        if k not in st.session_state:
+            st.session_state[k] = v
 
-    # HSV color detection parameters (hue 0-179, sat/val 0-255 in OpenCV)
-    if "hsv" not in st.session_state:
-        st.session_state.hsv = dict(h_min=90, h_max=130, s_min=80, s_max=255, v_min=50, v_max=255)
-
-    # Blob area bounds — controls what size dot counts as a stitch marker
-    if "area" not in st.session_state:
-        st.session_state.area = dict(min_area=200, max_area=8000)
-
-    # Which method set the HSV: "default" | "auto" | "manual"
-    if "hsv_source" not in st.session_state:
-        st.session_state.hsv_source = "default"
-
-    # Whether a recording run is currently active
-    if "run_active" not in st.session_state:
-        st.session_state.run_active = False
-
-    # Stitches logged in the current run
-    if "run_stitches" not in st.session_state:
-        st.session_state.run_stitches = []
-
-    # Cumulative stitch count across all runs this session
-    if "session_total" not in st.session_state:
-        st.session_state.session_total = 0
-
-    # Human-readable log lines shown on history page
-    if "log_lines" not in st.session_state:
-        st.session_state.log_lines = []
-
-    # List of completed run summaries (dicts) for history page
-    if "run_history" not in st.session_state:
-        st.session_state.run_history = []
-
-    # Rolling centroid buffer for temporal smoothing (last N frames)
-    if "centroid_history" not in st.session_state:
-        st.session_state.centroid_history = deque(maxlen=6)
-
-    # Last auto-tune result dict (for diagnostics display on calibration page)
-    if "auto_hsv_result" not in st.session_state:
-        st.session_state.auto_hsv_result = None
-
-    # Live mode toggle: continuously rerun to process camera frames
-    if "live_mode" not in st.session_state:
-        st.session_state.live_mode = False
-
-    # Store the last successfully processed annotated frame for display
-    if "last_annotated" not in st.session_state:
-        st.session_state.last_annotated = None
-
-    # Store last computed centroids so logging can read them without re-processing
-    if "last_centroids" not in st.session_state:
-        st.session_state.last_centroids = []
-
-    # Active page stored in state (matches sidebar radio)
-    if "page" not in st.session_state:
-        st.session_state.page = "Live Training"
-
-_init_state()   # run on every rerun — safe because of the "not in" guards above
+_init()
 
 # ─────────────────────────────────────────────────────
-#  MATH & GRADING HELPERS
+#  MATH + GRADING
 # ─────────────────────────────────────────────────────
 def seg_dist(p1, p2):
-    """Euclidean pixel distance between two (x,y) centroids."""
-    return math.sqrt((p2[0] - p1[0]) ** 2 + (p2[1] - p1[1]) ** 2)
+    """Euclidean pixel distance between two (x,y) points."""
+    return math.sqrt((p2[0]-p1[0])**2 + (p2[1]-p1[1])**2)
 
 def precision_score(d):
     """
-    Map a pixel distance d → score 0-100.
-
-    Design rationale:
-      - Optimal suture spacing in pixel terms is calibrated at 90px for a
-        standard webcam view at ~30cm from the skin model.
-      - Score degrades linearly: 1 point lost per 0.9px of deviation.
-      - max(0, ...) prevents negative scores.
-      - Users should aim for 80+ consistently.
+    Linear score 0-100 with peak at 90px.
+    Score = 100 - |d - 90| / 0.9
+    Rationale: 90px is the optimal inter-dot spacing at ~30cm camera distance.
+    Each pixel of deviation costs 1/0.9 ≈ 1.1 points; clamped at 0.
     """
     return max(0, int(100 - abs(d - 90) / 0.9))
 
-# Grade thresholds define clinical quality zones.
-# Each tuple: (upper_px_limit, label, bgr_color, feedback_text)
-# bgr_color is used in OpenCV drawing; rgb_hex is derived for CSS display.
+# (distance_upper_bound, label, bgr_color, feedback)
 GRADE_TABLE = [
-    (40,  "TOO CLOSE", (224, 82,  82),  "Stitches too close — widen placement"),
-    (60,  "SHORT",     (255, 215,  0),  "Slightly narrow — move dots apart"),
-    (120, "OPTIMAL",   (  0, 224, 154), "Perfect — within ideal suture range"),
-    (160, "WIDE",      (255, 215,  0),  "Slightly wide — bring dots closer"),
-    (999, "TOO WIDE",  (224, 82,  82),  "Too wide — reduce stitch distance"),
+    (40,  "TOO CLOSE", (100, 80,  200), "Stitches too close — widen placement"),
+    (60,  "SHORT",     (60,  160, 210), "Slightly narrow — move dots apart"),
+    (120, "OPTIMAL",   (80,  185, 130), "Perfect — within ideal suture range"),
+    (160, "WIDE",      (60,  160, 210), "Slightly wide — bring dots closer"),
+    (999, "TOO WIDE",  (100, 80,  200), "Too wide — reduce stitch distance"),
 ]
 
 def grade(d):
-    """
-    Look up the grade for a given pixel distance.
-    Returns (label, bgr_color_tuple, feedback_string)
-    """
+    """Return (label, bgr_color, feedback) for a pixel distance."""
     for threshold, label, color, feedback in GRADE_TABLE:
         if d < threshold:
             return label, color, feedback
-    return "TOO WIDE", (224, 82, 82), "Too wide — reduce stitch distance"
+    return "TOO WIDE", (100, 80, 200), "Too wide — reduce stitch distance"
 
 def bgr_to_hex(bgr):
-    """Convert OpenCV BGR tuple → CSS hex string for HTML rendering."""
+    """OpenCV BGR tuple → CSS hex (#rrggbb)."""
     b, g, r = bgr
     return f"#{r:02x}{g:02x}{b:02x}"
 
-def grade_css_class(label):
-    """Map grade label → CSS class name for color styling in HTML blocks."""
-    mapping = {
-        "OPTIMAL":   "grade-optimal",
-        "SHORT":     "grade-short",
-        "WIDE":      "grade-wide",
-        "TOO CLOSE": "grade-danger",
-        "TOO WIDE":  "grade-danger",
-    }
-    return mapping.get(label, "grade-short")
+def grade_class(label):
+    """Map grade label → CSS class for coloring HTML text."""
+    return {"OPTIMAL": "grade-optimal"}.get(
+        label,
+        "grade-danger" if label in ("TOO CLOSE", "TOO WIDE") else "grade-warn"
+    )
 
 # ─────────────────────────────────────────────────────
-#  AUTO-HSV ENGINE (6-pass adaptive tuner)
+#  AUTO-HSV (6-pass engine, unchanged from V5.0)
 # ─────────────────────────────────────────────────────
 def auto_tune_hsv(frame_bgr):
     """
-    Automatically determine optimal HSV parameters for the dominant
-    colored object (suture dot) in the frame.
-
-    Returns a dict of parameters or None if detection fails.
-
-    Six passes explained:
-    ──────────────────────────────────────────────────
-    Pass 1  CLAHE normalisation — equalises lighting across frame so that
-            shadowed or overexposed dots still have detectable hue.
-
-    Pass 2  Candidate pixel extraction — only look at pixels with enough
-            saturation and value to be a real colored dot (not grey/white skin).
-            Adaptive floors prevent both too-strict and too-loose filters.
-
-    Pass 3  Hue histogram + background suppression — hues that dominate >4%
-            of the frame are likely skin or background, so zero them out.
-            Then smooth the histogram to avoid noisy spikes.
-
-    Pass 4  Peak finding + spread analysis — find the dominant remaining hue
-            and measure how wide its cluster is. Add safety margin for the
-            final h_min/h_max window.
-
-    Pass 5  Blob validation with circularity filter — test the derived
-            parameters against real contours. Dots are circular; hair/fabric
-            edges are not. If no valid blobs found, relax the s/v floor.
-
-    Pass 6  Adaptive area estimation from frame resolution — so the same
-            code works on 480p, 720p, or 1080p cameras without manual tuning.
-    ──────────────────────────────────────────────────
+    6-pass adaptive HSV tuner. Returns parameter dict or None.
+    Pass 1: CLAHE normalise lighting.
+    Pass 2: Extract candidate pixels by adaptive sat/val floors.
+    Pass 3: Hue histogram, suppress background hues >4% of frame.
+    Pass 4: Find peak hue and measure cluster spread.
+    Pass 5: Validate with circularity blob check; relax if 0 blobs.
+    Pass 6: Scale area bounds to frame resolution.
     """
     if frame_bgr is None or frame_bgr.size == 0:
-        return None   # guard against empty/None frames
-
-    # ── Pass 1: CLAHE on L channel of Lab colorspace ─────────────────────
-    # CLAHE = Contrast Limited Adaptive Histogram Equalisation
-    # Lab separates luminance (L) from color (a,b) so we can boost contrast
-    # without shifting hue — critical for consistent dot detection under
-    # variable clinic/training-room lighting.
-    lab = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2Lab)
-    l, a, b = cv2.split(lab)                            # split channels
-    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))  # local equaliser
-    lab_eq = cv2.merge([clahe.apply(l), a, b])          # replace L with equalised L
-    enhanced = cv2.cvtColor(lab_eq, cv2.COLOR_Lab2BGR)  # back to BGR for HSV conversion
-
-    hsv = cv2.cvtColor(enhanced, cv2.COLOR_BGR2HSV)    # convert to HSV working space
-    h_ch = hsv[:, :, 0]   # Hue channel   (0-179 in OpenCV, represents 0-360°)
-    s_ch = hsv[:, :, 1]   # Saturation channel (0-255)
-    v_ch = hsv[:, :, 2]   # Value channel      (0-255)
-
-    # ── Pass 2: Adaptive candidate thresholds ────────────────────────────
-    mean_v = float(np.mean(v_ch))   # mean brightness across frame
-    mean_s = float(np.mean(s_ch))   # mean saturation across frame
-
-    # Set floors relative to mean — in a dim room, mean_v is low so floor is low
-    # This prevents rejecting real dots just because the environment is dark
-    v_floor = max(15, int(mean_v * 0.22))    # require at least 22% of mean brightness
-    s_floor = max(25, int(mean_s * 0.28))    # require at least 28% of mean saturation
-
-    # Boolean mask: True where pixel might be a colored dot
-    candidate_mask = (s_ch > s_floor) & (v_ch > v_floor)
-
-    if candidate_mask.sum() < 80:
-        # Fewer than 80 candidate pixels → frame is too dark or featureless
         return None
 
-    candidate_hues = h_ch[candidate_mask]   # extract hue values of candidates only
+    # Pass 1 — CLAHE on Lab L channel for lighting normalisation
+    lab = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2Lab)
+    l, a, b = cv2.split(lab)
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    enhanced = cv2.cvtColor(cv2.merge([clahe.apply(l), a, b]), cv2.COLOR_Lab2BGR)
 
-    # ── Pass 3: Histogram + background suppression ───────────────────────
-    # 180-bin histogram (one per OpenCV hue degree)
+    hsv = cv2.cvtColor(enhanced, cv2.COLOR_BGR2HSV)
+    h_ch, s_ch, v_ch = hsv[:,:,0], hsv[:,:,1], hsv[:,:,2]
+
+    # Pass 2 — adaptive candidate floors (22% of mean brightness, 28% of mean sat)
+    mean_v, mean_s = float(np.mean(v_ch)), float(np.mean(s_ch))
+    v_floor = max(15, int(mean_v * 0.22))
+    s_floor = max(25, int(mean_s * 0.28))
+    candidate_mask = (s_ch > s_floor) & (v_ch > v_floor)
+    if candidate_mask.sum() < 80:
+        return None
+
+    candidate_hues = h_ch[candidate_mask]
+
+    # Pass 3 — hue histogram + background suppression
     hist, _ = np.histogram(candidate_hues, bins=180, range=(0, 179))
-
-    # Box-smooth with 9-wide kernel to reduce single-bin spikes
-    kernel = np.ones(9) / 9
-    hist_sm = np.convolve(hist.astype(float), kernel, mode='same')
-
-    # Suppress background hues: any hue covering >4% of the entire frame
-    # is probably skin tone, surgical gown, or room background — not a dot
+    hist_sm = np.convolve(hist.astype(float), np.ones(9)/9, mode='same')
     total_px = frame_bgr.shape[0] * frame_bgr.shape[1]
     hist_sm[hist_sm > total_px * 0.04] = 0   # zero-out dominant background hues
-
     if hist_sm.max() < 30:
-        return None   # no meaningful colored peak found after suppression
+        return None
 
-    # ── Pass 4: Peak + spread ────────────────────────────────────────────
-    peak_hue = int(np.argmax(hist_sm))   # hue degree with highest count
+    # Pass 4 — peak hue + spread measurement
+    peak_hue = int(np.argmax(hist_sm))
     peak_val = hist_sm[peak_hue]
-    thresh20 = peak_val * 0.20           # spread threshold: 20% of peak height
-
-    # Measure how wide the hue cluster is around the peak
+    thresh20 = peak_val * 0.20
     spread = 0
     for delta in range(1, 35):
-        left  = hist_sm[(peak_hue - delta) % 180] > thresh20   # wrap around 0/179
+        left  = hist_sm[(peak_hue - delta) % 180] > thresh20
         right = hist_sm[(peak_hue + delta) % 180] > thresh20
         if left or right:
-            spread = delta   # extend spread as long as cluster continues
+            spread = delta
         else:
-            break            # stop when histogram drops below 20% of peak
+            break
 
-    # Add 6px safety margin so border pixels aren't cut off
     tol   = max(14, spread + 6)
     h_min = max(0,   peak_hue - tol)
     h_max = min(179, peak_hue + tol)
-
-    # Ensure minimum window width of 16° so tiny clusters still detect
     if (h_max - h_min) < 16:
         c = (h_min + h_max) // 2
-        h_min, h_max = max(0, c - 8), min(179, c + 8)
+        h_min, h_max = max(0, c-8), min(179, c+8)
 
-    # Derive saturation/value bounds from pixels near the dominant hue
+    # Derive s/v bounds from pixels near peak hue (8th percentile as floor)
     near_peak = candidate_mask & (np.abs(h_ch.astype(int) - peak_hue) < tol)
     sat_near  = s_ch[near_peak]
     val_near  = v_ch[near_peak]
-    # Use 8th percentile as floor so 92% of real dot pixels pass through
     s_min = max(25, int(np.percentile(sat_near, 8))) if len(sat_near) > 0 else s_floor
     v_min = max(15, int(np.percentile(val_near, 8))) if len(val_near) > 0 else v_floor
 
-    # ── Pass 5: Validate with circularity check ──────────────────────────
-    img_area = total_px
-    # Initial area bounds before adaptive sizing
-    min_area = max(40,  int(img_area * 0.00025))   # 0.025% of frame = smallest dot
-    max_area = min(int(img_area * 0.05), 22000)    # 5% of frame = largest dot
-
-    # Build a test mask and count valid (circular) blobs
+    # Pass 5 — validate with circularity blob check
+    min_area = max(40, int(total_px * 0.00025))
+    max_area = min(int(total_px * 0.05), 22000)
     test_mask = _build_mask_internal(enhanced, h_min, h_max, s_min, 255, v_min, 255)
-    cnts, _   = cv2.findContours(test_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    cnts, _ = cv2.findContours(test_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     valid_blobs = 0
     for c in cnts:
         area = cv2.contourArea(c)
         if min_area <= area <= max_area:
-            perimeter = cv2.arcLength(c, True)
-            if perimeter > 0:
-                # Circularity = 4π·area / perimeter² (=1.0 for perfect circle)
-                # Reject non-circular shapes like hair strands, fabric edges, creases
-                circularity = 4 * math.pi * area / (perimeter ** 2)
-                if circularity > 0.25:    # 0.25 = roughly blob-like (squares ~0.79)
-                    valid_blobs += 1
-
-    # If 0 valid blobs, relax s/v floors and try less strict detection
+            perim = cv2.arcLength(c, True)
+            if perim > 0 and (4 * math.pi * area / perim**2) > 0.25:
+                valid_blobs += 1
     if valid_blobs == 0:
-        s_min = max(20, s_min - 20)   # widen saturation floor
-        v_min = max(15, v_min - 20)   # widen brightness floor
+        s_min = max(20, s_min - 20)
+        v_min = max(15, v_min - 20)
 
-    # ── Pass 6: Adaptive area bounds from frame resolution ───────────────
-    fh = frame_bgr.shape[0]           # frame height in pixels
-    # Assume suture dots occupy 0.8%-6% of frame height as radius
-    r_min = max(3, int(fh * 0.008))   # minimum dot radius in pixels
-    r_max = max(r_min + 5, int(fh * 0.06))   # maximum dot radius in pixels
-    # Convert radius → area bounds (πr²) with 30% tolerance margins
+    # Pass 6 — adaptive area from frame height
+    fh = frame_bgr.shape[0]
+    r_min = max(3, int(fh * 0.008))
+    r_max = max(r_min + 5, int(fh * 0.06))
     min_area = max(40, int(math.pi * r_min**2 * 0.7))
     max_area = min(22000, int(math.pi * r_max**2 * 1.3))
 
@@ -533,84 +463,51 @@ def auto_tune_hsv(frame_bgr):
         "min_area": min_area, "max_area": max_area,
         "peak_hue": peak_hue,
         "valid_blobs": valid_blobs,
-        "spread": spread,
-        "tol": tol,
+        "spread": spread, "tol": tol,
     }
 
 # ─────────────────────────────────────────────────────
-#  MASK BUILDING (internal + public wrappers)
+#  MASK BUILDING
 # ─────────────────────────────────────────────────────
 def _build_mask_internal(frame_bgr, h_min, h_max, s_min, s_max, v_min, v_max):
     """
-    Convert BGR frame to HSV, apply color range mask, then morphologically
-    clean it up to remove noise and fill small holes in blobs.
-
-    Morphological operations:
-      OPEN  (erode then dilate) → removes speckle noise smaller than kernel
-      CLOSE (dilate then erode) → fills small gaps/holes inside blobs
-    Both use a 5x5 elliptical kernel matching the circular shape of dots.
+    Build binary HSV mask with CLAHE normalisation and morphological cleanup.
+    OPEN removes speckle noise; CLOSE fills holes in blobs.
+    Both use elliptical 5x5 kernel (matches circular dot shape).
     """
-    # Clip all parameters to valid OpenCV ranges
-    h_min, h_max = sorted([int(np.clip(h_min, 0, 179)), int(np.clip(h_max, 0, 179))])
-    s_min, s_max = sorted([int(np.clip(s_min, 0, 255)), int(np.clip(s_max, 0, 255))])
-    v_min, v_max = sorted([int(np.clip(v_min, 0, 255)), int(np.clip(v_max, 0, 255))])
+    h_min, h_max = sorted([int(np.clip(h_min,0,179)), int(np.clip(h_max,0,179))])
+    s_min, s_max = sorted([int(np.clip(s_min,0,255)), int(np.clip(s_max,0,255))])
+    v_min, v_max = sorted([int(np.clip(v_min,0,255)), int(np.clip(v_max,0,255))])
 
-    # Apply CLAHE for consistent detection under variable lighting (same as auto-tune)
     lab = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2Lab)
     l, a, b = cv2.split(lab)
-    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-    lab2  = cv2.merge([clahe.apply(l), a, b])
-    enh   = cv2.cvtColor(lab2, cv2.COLOR_Lab2BGR)
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
+    enh = cv2.cvtColor(cv2.merge([clahe.apply(l), a, b]), cv2.COLOR_Lab2BGR)
 
-    hsv   = cv2.cvtColor(enh, cv2.COLOR_BGR2HSV)
-    lower = np.array([h_min, s_min, v_min], dtype=np.uint8)   # lower HSV bound
-    upper = np.array([h_max, s_max, v_max], dtype=np.uint8)   # upper HSV bound
-    mask  = cv2.inRange(hsv, lower, upper)                     # binary mask
+    hsv  = cv2.cvtColor(enh, cv2.COLOR_BGR2HSV)
+    mask = cv2.inRange(hsv,
+                       np.array([h_min, s_min, v_min], dtype=np.uint8),
+                       np.array([h_max, s_max, v_max], dtype=np.uint8))
 
-    # Elliptical 5x5 structuring element — matches dot shape better than square
-    k    = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN,  k, iterations=2)   # noise removal
-    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, k, iterations=2)   # hole filling
+    k    = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5,5))
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN,  k, iterations=2)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, k, iterations=2)
     return mask
-
-def build_mask(frame_bgr):
-    """
-    Public wrapper — reads HSV parameters from session state.
-    Returns binary mask (numpy uint8 array, 0 or 255).
-    """
-    h = st.session_state.hsv
-    a = st.session_state.area
-    return _build_mask_internal(
-        frame_bgr,
-        h["h_min"], h["h_max"],
-        h["s_min"], h["s_max"],
-        h["v_min"], h["v_max"],
-    )
 
 # ─────────────────────────────────────────────────────
 #  BLOB DETECTION
 # ─────────────────────────────────────────────────────
 def detect_blobs(frame_bgr):
     """
-    Find suture dot centroids in the frame.
-
-    Algorithm:
-      1. Build HSV color mask (isolates dot color).
-      2. Find external contours in the mask.
-      3. Filter by area bounds (reject too-small noise and too-large patches).
-      4. Filter by circularity ≥ 0.20 (reject non-dot shapes).
-      5. Compute centroid via image moments.
-      6. Sort by x then nearest-neighbour chain for consistent left-to-right ordering.
-
-    Returns:
-      centroids — list of (cx, cy) tuples, up to 10
-      mask      — the raw binary mask (for display on calibration page)
+    Detect suture dot centroids.
+    Filters: area bounds + circularity >= 0.20 (rejects non-dot shapes).
+    Orders by nearest-neighbour chain (left-to-right physical stitch order).
+    Returns (centroids_list, mask).
     """
     h_p = st.session_state.hsv
     a_p = st.session_state.area
-
-    min_a = max(10, int(a_p["min_area"]))    # absolute minimum blob area in px²
-    max_a = max(min_a + 100, int(a_p["max_area"]))   # absolute maximum
+    min_a = max(10, int(a_p["min_area"]))
+    max_a = max(min_a + 100, int(a_p["max_area"]))
 
     mask = _build_mask_internal(
         frame_bgr,
@@ -618,333 +515,351 @@ def detect_blobs(frame_bgr):
         h_p["s_min"], h_p["s_max"],
         h_p["v_min"], h_p["v_max"],
     )
-
-    # Find all external contours — CHAIN_APPROX_SIMPLE compresses horizontal/vertical
-    # runs into endpoints to save memory (fine for centroid calculation)
     cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-    pts = []    # will hold (cx, cy, area) for each valid blob
+    pts = []
     for c in cnts:
         area = cv2.contourArea(c)
         if not (min_a <= area <= max_a):
-            continue   # area filter — skip too-small noise or too-large patches
-
-        perimeter = cv2.arcLength(c, True)
-        if perimeter == 0:
-            continue   # degenerate contour — skip
-
-        # Circularity = 4π·A / P² — equals 1.0 for a perfect circle
-        # Hair strands: ~0.01-0.05, fabric edges: ~0.05-0.15, dots: ≥0.25
-        circularity = 4 * math.pi * area / (perimeter ** 2)
-        if circularity < 0.20:
-            continue   # reject non-circular blobs
-
-        # Image moments: m10/m00 = centroid x, m01/m00 = centroid y
+            continue
+        perim = cv2.arcLength(c, True)
+        if perim == 0:
+            continue
+        # Circularity = 4π·A/P² — 1.0 for perfect circle; dots ≥ 0.20
+        if (4 * math.pi * area / perim**2) < 0.20:
+            continue
         M = cv2.moments(c)
         if M["m00"] > 0:
-            cx = int(M["m10"] / M["m00"])   # x centroid
-            cy = int(M["m01"] / M["m00"])   # y centroid
-            pts.append((cx, cy, area))
+            pts.append((int(M["m10"]/M["m00"]), int(M["m01"]/M["m00"]), area))
 
     if len(pts) < 2:
-        # Return whatever we have (0 or 1 points) — caller handles this case
-        return [(p[0], p[1]) for p in pts[:1]], mask
+        return [(p[0],p[1]) for p in pts[:1]], mask
 
-    # Sort all blobs left-to-right as starting point
     pts = sorted(pts, key=lambda p: p[0])
-
-    # Nearest-neighbour chain: ensures P1→P2→P3... follows physical stitch order
-    # rather than arbitrary left-to-right, which can skip around if dots misalign
     ordered = [pts.pop(0)]
     while pts:
         last = ordered[-1]
-        # Find the closest remaining point to the current chain tail
-        idx = min(range(len(pts)),
-                  key=lambda i: (pts[i][0] - last[0])**2 + (pts[i][1] - last[1])**2)
+        idx = min(range(len(pts)), key=lambda i: (pts[i][0]-last[0])**2+(pts[i][1]-last[1])**2)
         ordered.append(pts.pop(idx))
 
-    return [(p[0], p[1]) for p in ordered[:10]], mask   # cap at 10 dots
+    return [(p[0],p[1]) for p in ordered[:10]], mask
 
 # ─────────────────────────────────────────────────────
 #  TEMPORAL SMOOTHING
 # ─────────────────────────────────────────────────────
 def smooth_centroids(new_centroids):
     """
-    Average centroids across the last N frames to reduce jitter from
-    minor camera shake or single-frame detection noise.
-
-    Only smooths if dot count is stable (same count in all buffered frames),
-    because averaging a 3-dot frame with a 2-dot frame produces garbage.
-
-    Modifies st.session_state.centroid_history in-place.
-    Returns smoothed centroid list.
+    Average centroids over last N frames (deque buffer in session state).
+    Only smooths if dot count is stable across all buffered frames.
+    Averaging with mismatched counts produces garbage — so skip in that case.
     """
     history = st.session_state.centroid_history
-
     if not new_centroids:
-        history.clear()   # reset history when dots disappear
+        history.clear()
         return new_centroids
-
-    history.append(new_centroids)   # add new frame to rolling buffer
-
-    # Check count stability across all buffered frames
+    history.append(new_centroids)
     counts = [len(f) for f in history]
     if len(set(counts)) != 1:
-        return new_centroids   # inconsistent count — use raw (no averaging)
-
-    n = len(history)   # number of frames in buffer
-    k = len(new_centroids)   # number of dots per frame
-    smoothed = []
-    for i in range(k):
-        # Average the i-th centroid across all buffered frames
-        avg_x = int(sum(history[j][i][0] for j in range(n)) / n)
-        avg_y = int(sum(history[j][i][1] for j in range(n)) / n)
-        smoothed.append((avg_x, avg_y))
-    return smoothed
+        return new_centroids   # count changed — use raw
+    n, k = len(history), len(new_centroids)
+    return [
+        (int(sum(history[j][i][0] for j in range(n))/n),
+         int(sum(history[j][i][1] for j in range(n))/n))
+        for i in range(k)
+    ]
 
 # ─────────────────────────────────────────────────────
-#  FRAME ANNOTATION (OpenCV drawing)
+#  FRAME ANNOTATION
 # ─────────────────────────────────────────────────────
-# Color palette for dot circles — each dot gets a distinct color
+# Muted dot color palette — no neons
 DOT_COLORS_BGR = [
-    (154, 224,   0), (255, 140,  66), (255, 200,  77),
-    (255, 120, 200), (255, 219,  77), (130, 255, 140),
-    ( 60, 180, 255), (255,  80,  60), (180,  80, 220),
-    (180, 255,  80),
+    (120, 190, 110), (100, 160, 210), (150, 120, 200),
+    (100, 200, 170), (200, 160,  80), (140, 190, 220),
+    ( 80, 140, 200), (190, 130,  90), (110, 200, 140),
+    (160, 100, 180),
 ]
 
-def draw_dashed_line(frame, p1, p2, color, thickness=2):
-    """
-    Draw a dashed line between two points.
-    Alternates between 10px drawn segments and 5px gaps.
-    Used to visually link suture dot pairs on the annotated output.
-    """
-    dx, dy = p2[0] - p1[0], p2[1] - p1[1]
-    length = max(1, math.sqrt(dx**2 + dy**2))   # total line length
-    ux, uy = dx / length, dy / length             # unit direction vector
-    pos, on = 0.0, True                           # position along line, draw flag
-
+def draw_dashed(frame, p1, p2, color, thickness=2):
+    """Dashed line between p1 and p2: 10px on, 5px off segments."""
+    dx, dy = p2[0]-p1[0], p2[1]-p1[1]
+    length = max(1, math.sqrt(dx**2+dy**2))
+    ux, uy = dx/length, dy/length
+    pos, on = 0.0, True
     while pos < length:
-        end = min(pos + (10 if on else 5), length)   # segment end position
+        end = min(pos + (10 if on else 5), length)
         if on:
-            # Compute actual pixel positions along the direction vector
-            a = (int(p1[0] + ux * pos), int(p1[1] + uy * pos))
-            b = (int(p1[0] + ux * end), int(p1[1] + uy * end))
+            a = (int(p1[0]+ux*pos), int(p1[1]+uy*pos))
+            b = (int(p1[0]+ux*end), int(p1[1]+uy*end))
             cv2.line(frame, a, b, color, thickness, cv2.LINE_AA)
-        pos, on = end, not on   # advance and toggle draw/skip
+        pos, on = end, not on
 
-def annotate_frame(frame_bgr, centroids, hsv_source="auto"):
+def annotate_frame(frame_bgr, centroids):
     """
-    Draw all visual overlays onto a copy of the frame:
-      - Dashed lines between consecutive dot pairs with distance labels
-      - Dot circles with labels (P1, P2, ...)
-      - HUD panel top-left: dot count, avg score, distance, HSV mode
-      - Status bar bottom: RUN/STANDBY, session stitch count
-      - If <2 dots: "NO DOTS DETECTED" overlay message
-
+    Draw overlays on a copy of the frame:
+    - Dashed lines between dot pairs with distance + grade labels
+    - Dot circles (outer ring + filled inner + bright center)
+    - Top-left HUD: dot count, avg score, avg distance, HSV mode
+    - Bottom status bar: REC/STANDBY + session stitch count
     Returns annotated BGR frame.
     """
-    out = frame_bgr.copy()   # never modify the original frame
-    h, w = out.shape[:2]
+    out = frame_bgr.copy()
+    fh, fw = out.shape[:2]
 
     if len(centroids) >= 2:
-        # Compute distances and scores for all consecutive pairs
-        dists  = [seg_dist(centroids[i], centroids[i + 1]) for i in range(len(centroids) - 1)]
+        dists  = [seg_dist(centroids[i], centroids[i+1]) for i in range(len(centroids)-1)]
         scores = [precision_score(d) for d in dists]
-        avg_sc = int(sum(scores) / len(scores))   # average score across all pairs
-        avg_d  = sum(dists) / len(dists)           # average distance across all pairs
+        avg_sc = int(sum(scores)/len(scores))
+        avg_d  = sum(dists)/len(dists)
 
-        # ── Draw segment lines and labels ──
-        for i in range(len(centroids) - 1):
-            p1, p2 = centroids[i], centroids[i + 1]
+        for i in range(len(centroids)-1):
+            p1, p2 = centroids[i], centroids[i+1]
             d = dists[i]
-            label, color, _ = grade(d)
+            lbl, col, _ = grade(d)
             sc = scores[i]
+            draw_dashed(out, p1, p2, col, 2)
+            mid = ((p1[0]+p2[0])//2, (p1[1]+p2[1])//2)
+            for txt, dy_off in [(f"{d:.0f}px", -18), (f"{lbl} {sc}/100", 0)]:
+                (tw, th), _ = cv2.getTextSize(txt, cv2.FONT_HERSHEY_SIMPLEX, 0.40, 1)
+                cv2.rectangle(out, (mid[0]-3, mid[1]+dy_off-th-2),
+                              (mid[0]+tw+3, mid[1]+dy_off+2), (6, 10, 16), -1)
+                cv2.putText(out, txt, (mid[0], mid[1]+dy_off),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.40, col, 1, cv2.LINE_AA)
 
-            draw_dashed_line(out, p1, p2, color, 2)
-
-            # Midpoint label position
-            mid = ((p1[0] + p2[0]) // 2, (p1[1] + p2[1]) // 2)
-
-            # Draw two text labels: pixel distance on top, grade+score below
-            for txt, dy_off in [(f"{d:.0f}px", -18), (f"{label}  {sc}/100", 0)]:
-                (tw, th), _ = cv2.getTextSize(txt, cv2.FONT_HERSHEY_SIMPLEX, 0.42, 1)
-                # Dark background rectangle behind text for readability
-                cv2.rectangle(out,
-                              (mid[0] - 4, mid[1] + dy_off - th - 2),
-                              (mid[0] + tw + 4, mid[1] + dy_off + 2),
-                              (8, 14, 20), -1)   # very dark blue-black background
-                cv2.putText(out, txt, (mid[0], mid[1] + dy_off),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.42, color, 1, cv2.LINE_AA)
-
-        # ── Draw dot circles ──
         for i, pt in enumerate(centroids):
             c = DOT_COLORS_BGR[i % len(DOT_COLORS_BGR)]
-            cv2.circle(out, pt, 18, c, 1, cv2.LINE_AA)    # outer ring
-            cv2.circle(out, pt, 10, c, -1, cv2.LINE_AA)   # filled inner
-            cv2.circle(out, pt,  3, (245, 255, 250), -1, cv2.LINE_AA)   # bright center dot
-            cv2.putText(out, f"P{i + 1}", (pt[0] + 20, pt[1] - 12),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.46, c, 1, cv2.LINE_AA)
+            cv2.circle(out, pt, 16, c, 1, cv2.LINE_AA)
+            cv2.circle(out, pt,  9, c, -1, cv2.LINE_AA)
+            cv2.circle(out, pt,  2, (230, 240, 235), -1, cv2.LINE_AA)
+            cv2.putText(out, f"P{i+1}", (pt[0]+18, pt[1]-10),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.42, c, 1, cv2.LINE_AA)
 
-        # ── HUD top-left ──
-        run_state = st.session_state.run_active
+        # HUD top-left
+        score_col = (80,185,130) if avg_sc>=70 else (60,160,210) if avg_sc>=40 else (100,80,200)
         hud = [
-            (f"DOTS: {len(centroids)}", (180, 220, 200)),
-            (f"AVG SCORE: {avg_sc}/100", (0, 224, 154) if avg_sc >= 70 else (255, 215, 0) if avg_sc >= 40 else (224, 82, 82)),
-            (f"AVG DIST: {avg_d:.0f}px", (180, 220, 200)),
-            (f"MODE: {hsv_source.upper()}", (0, 180, 140)),
+            (f"DOTS: {len(centroids)}", (140, 180, 160)),
+            (f"SCORE: {avg_sc}/100",    score_col),
+            (f"DIST: {avg_d:.0f}px",    (140, 180, 160)),
+            (f"HSV: {st.session_state.hsv_source.upper()}", (80, 150, 120)),
         ]
         for j, (txt, col) in enumerate(hud):
-            y = 12 + j * 22 + 18
-            (tw, th), _ = cv2.getTextSize(txt, cv2.FONT_HERSHEY_SIMPLEX, 0.46, 1)
-            cv2.rectangle(out, (8, y - th - 3), (12 + tw + 4, y + 3), (6, 12, 18), -1)
-            cv2.putText(out, txt, (10, y), cv2.FONT_HERSHEY_SIMPLEX, 0.46, col, 1, cv2.LINE_AA)
+            y = 10 + j*20 + 16
+            (tw, th), _ = cv2.getTextSize(txt, cv2.FONT_HERSHEY_SIMPLEX, 0.42, 1)
+            cv2.rectangle(out, (6, y-th-2), (10+tw+2, y+2), (5, 9, 14), -1)
+            cv2.putText(out, txt, (8, y), cv2.FONT_HERSHEY_SIMPLEX, 0.42, col, 1, cv2.LINE_AA)
 
-        # ── Status bar ──
-        rec_txt = "● REC" if run_state else "○ STANDBY"
-        rec_col = (0, 80, 220) if run_state else (60, 90, 70)
-        cv2.rectangle(out, (0, h - 28), (w, h), (6, 12, 18), -1)
-        cv2.putText(out,
-                    f"SUTERUP V5  {rec_txt}  SESSION: {st.session_state.session_total} stitches",
-                    (10, h - 9), cv2.FONT_HERSHEY_SIMPLEX, 0.42, rec_col, 1, cv2.LINE_AA)
+        # Bottom status bar
+        is_rec = st.session_state.run_active
+        rec_txt = "REC" if is_rec else "STANDBY"
+        rec_col = (80, 100, 200) if is_rec else (50, 80, 70)
+        cv2.rectangle(out, (0, fh-24), (fw, fh), (5, 9, 14), -1)
+        cv2.putText(out, f"SUTERUP  {rec_txt}  STITCHES: {st.session_state.session_total}",
+                    (8, fh-7), cv2.FONT_HERSHEY_SIMPLEX, 0.38, rec_col, 1, cv2.LINE_AA)
 
     else:
-        # ── No-dots overlay ──
-        msg = ("NO DOTS DETECTED — run Auto-Tune or adjust HSV"
-               if len(centroids) == 0 else "1 DOT FOUND — need at least 2")
-        overlay_y = h // 2
-        cv2.rectangle(out, (0, overlay_y - 24), (w, overlay_y + 12), (8, 14, 24), -1)
-        cv2.putText(out, msg, (12, overlay_y),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.52, (70, 130, 255), 1, cv2.LINE_AA)
+        msg = "NO DOTS — run Auto-Tune or check Calibration" if not centroids else "1 DOT — need 2+"
+        oy = fh // 2
+        cv2.rectangle(out, (0, oy-22), (fw, oy+10), (6, 10, 16), -1)
+        cv2.putText(out, msg, (10, oy), cv2.FONT_HERSHEY_SIMPLEX, 0.46, (70, 110, 160), 1, cv2.LINE_AA)
 
     return out
 
 # ─────────────────────────────────────────────────────
-#  FRAME INGESTION: camera_input → BGR numpy
+#  CAMERA HELPERS
 # ─────────────────────────────────────────────────────
-def camera_to_bgr(camera_file):
+def camera_to_bgr(cam_file):
     """
-    Convert Streamlit's st.camera_input output (uploaded file object, JPEG bytes)
-    into an OpenCV BGR numpy array for processing.
-
-    Steps:
-      1. Read raw bytes from the file-like object.
-      2. Decode JPEG bytes into a numpy array via cv2.imdecode.
-      3. The resulting array is already BGR (OpenCV default).
-
-    Returns numpy array shape (H, W, 3) or None on failure.
+    Streamlit camera_input → OpenCV BGR numpy array.
+    Reads JPEG bytes from the file buffer, decodes to BGR via cv2.imdecode.
+    Returns None on any failure (no crash).
     """
-    if camera_file is None:
+    if cam_file is None:
         return None
     try:
-        # Read bytes from the file buffer
-        raw_bytes = camera_file.read()
-        # Convert raw bytes to 1D numpy array then decode as image
-        np_arr = np.frombuffer(raw_bytes, np.uint8)
-        bgr = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)   # decode to BGR
+        raw = cam_file.read()
+        arr = np.frombuffer(raw, np.uint8)
+        bgr = cv2.imdecode(arr, cv2.IMREAD_COLOR)
         return bgr
-    except Exception as e:
-        # Log to Streamlit console but don't crash the app
-        st.warning(f"Camera read error: {e}")
+    except Exception:
         return None
 
-def bgr_to_rgb_pil(bgr):
-    """
-    Convert BGR numpy array → RGB PIL Image for st.image() display.
-    Streamlit's st.image() expects RGB, not BGR.
-    """
+def bgr_to_pil(bgr):
+    """BGR numpy → RGB PIL Image for st.image() (Streamlit expects RGB)."""
     if bgr is None:
         return None
-    rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)   # swap R and B channels
-    return Image.fromarray(rgb)                   # wrap in PIL Image
+    return Image.fromarray(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB))
 
-# ─────────────────────────────────────────────────────
-#  PROCESS PIPELINE (called on every camera frame)
-# ─────────────────────────────────────────────────────
-def process_camera_frame(camera_file):
+def process_frame(cam_file):
     """
-    Full pipeline: camera file → annotated image + centroid data.
-
-    1. Convert camera file to BGR.
-    2. Detect blobs → raw centroids.
-    3. Apply temporal smoothing.
-    4. Annotate frame with overlays.
-    5. Store results in session state for the log button.
-    6. Convert annotated BGR → RGB PIL for display.
-
-    Returns (pil_image, centroids) or (None, []) on failure.
+    Full pipeline: camera file → annotated PIL image + centroids.
+    Returns (pil_image, centroids). Updates session state cache.
+    Safe — returns (None, []) on any error.
     """
-    bgr = camera_to_bgr(camera_file)
+    bgr = camera_to_bgr(cam_file)
     if bgr is None:
         return None, []
-
     try:
-        centroids_raw, _mask = detect_blobs(bgr)
+        centroids_raw, _ = detect_blobs(bgr)
         centroids = smooth_centroids(centroids_raw)
-        annotated_bgr = annotate_frame(bgr, centroids, st.session_state.hsv_source)
-        st.session_state.last_annotated = annotated_bgr   # cache for potential re-display
-        st.session_state.last_centroids = centroids        # cache for log button
-        return bgr_to_rgb_pil(annotated_bgr), centroids
+        annotated = annotate_frame(bgr, centroids)
+        st.session_state.last_annotated = annotated
+        st.session_state.last_centroids = centroids
+        return bgr_to_pil(annotated), centroids
     except Exception as e:
-        st.error(f"Processing error: {e}")
-        return bgr_to_rgb_pil(bgr), []   # return raw frame on error, don't crash
+        st.session_state.last_annotated = bgr
+        st.session_state.last_centroids = []
+        return bgr_to_pil(bgr), []
 
 # ─────────────────────────────────────────────────────
-#  SIDEBAR NAVIGATION
+#  SCORE CARD HTML  (reused in snapshot + live mode)
 # ─────────────────────────────────────────────────────
-with st.sidebar:
-    # Logo / brand
-    st.markdown("""
-    <div style="padding:16px 0 20px 0;">
-        <div style="font-family:'Space Grotesk',sans-serif;font-size:1.5em;font-weight:700;
-                    color:#5bc4f5;letter-spacing:-0.03em;">⚕ SUTERUP</div>
-        <div style="font-size:0.65em;color:#1e4a6a;letter-spacing:0.12em;">V5.0 · SURGICAL TRAINING</div>
+def render_score_card(centroids):
+    """
+    Build and render the analysis card below the annotated image.
+    Shows grade, score bar, segment table, and summary stats.
+    """
+    if len(centroids) < 2:
+        if len(centroids) == 1:
+            st.markdown('<div class="card" style="color:#c8a53a;">⚠ 1 dot found — need at least 2</div>',
+                        unsafe_allow_html=True)
+        else:
+            st.markdown('<div class="card" style="color:#3a6070;">Waiting for dots...</div>',
+                        unsafe_allow_html=True)
+        return
+
+    dists  = [seg_dist(centroids[i], centroids[i+1]) for i in range(len(centroids)-1)]
+    scores = [precision_score(d) for d in dists]
+    avg_sc = int(sum(scores)/len(scores))
+    avg_d  = sum(dists)/len(dists)
+    last_d = dists[-1]
+    label, col_bgr, feedback = grade(last_d)
+    hex_col = bgr_to_hex(col_bgr)
+    gc = grade_class(label)
+
+    bar_color = "#4db88a" if avg_sc>=70 else "#c8a53a" if avg_sc>=40 else "#b85a5a"
+
+    rows = "".join(
+        f"<tr>"
+        f"<td style='color:#2a4a5a;padding:3px 10px;'>P{i+1}→P{i+2}</td>"
+        f"<td class='{grade_class(grade(d)[0])}' style='padding:3px 10px;'>{d:.1f}px</td>"
+        f"<td class='{grade_class(grade(d)[0])}' style='padding:3px 10px;'>{grade(d)[0]}</td>"
+        f"<td class='{grade_class(grade(d)[0])}' style='padding:3px 10px;'>{sc}/100</td>"
+        f"</tr>"
+        for i, (d, sc) in enumerate(zip(dists, scores))
+    )
+
+    st.markdown(f"""
+    <div class="card" style="margin-top:10px;">
+      <div style="display:flex;align-items:baseline;gap:10px;margin-bottom:4px;">
+        <span class="{gc}" style="font-family:'DM Sans',sans-serif;font-size:1.05em;font-weight:600;">
+          {label}
+        </span>
+        <span style="color:#2a4a5a;font-size:0.8em;">{avg_sc}/100</span>
+      </div>
+      <div class="score-bar-bg">
+        <div class="score-bar-fill" style="width:{avg_sc}%;background:{bar_color};"></div>
+      </div>
+      <div style="color:#2e5060;font-size:0.75em;margin-bottom:10px;">{feedback}</div>
+      <table style="width:100%;border-collapse:collapse;font-size:0.74em;">
+        <tr style="color:#1a3040;border-bottom:1px solid #0e1820;">
+          <td style="padding:3px 10px;">Segment</td>
+          <td style="padding:3px 10px;">Distance</td>
+          <td style="padding:3px 10px;">Grade</td>
+          <td style="padding:3px 10px;">Score</td>
+        </tr>
+        {rows}
+      </table>
+      <div style="margin-top:10px;color:#1e3a4a;font-size:0.7em;">
+        Avg dist: <span style="color:#4a7a8a;">{avg_d:.1f}px</span>
+        &nbsp;·&nbsp; Dots: <span style="color:#4a7a8a;">{len(centroids)}</span>
+        &nbsp;·&nbsp; Session: <span style="color:#4a7a8a;">{st.session_state.session_total}</span>
+      </div>
     </div>
     """, unsafe_allow_html=True)
 
-    st.markdown("---")
+# ─────────────────────────────────────────────────────
+#  LOG CURRENT FRAME (shared by both modes)
+# ─────────────────────────────────────────────────────
+def log_frame():
+    """
+    Save current centroids as stitch measurements to run log.
+    Increments session_total and appends structured log lines.
+    """
+    cents = st.session_state.last_centroids
+    if len(cents) < 2:
+        st.session_state.log_lines.append("⚠ Log skipped — fewer than 2 dots visible")
+        return 0
+    ts = datetime.now().strftime("%H:%M:%S")
+    count = 0
+    for i in range(len(cents)-1):
+        d  = seg_dist(cents[i], cents[i+1])
+        sc = precision_score(d)
+        gl, _, _ = grade(d)
+        st.session_state.run_stitches.append({"d": d, "sc": sc})
+        st.session_state.session_total += 1
+        count += 1
+        st.session_state.log_lines.append(
+            f"[{ts}] #{st.session_state.session_total} P{i+1}→P{i+2} "
+            f"| {d:.1f}px | {gl} | {sc}/100"
+        )
+    st.session_state.log_lines.append(f"+ {count} stitch(es) saved")
+    return count
 
-    # Multi-page navigation
+# ─────────────────────────────────────────────────────
+#  SIDEBAR
+# ─────────────────────────────────────────────────────
+with st.sidebar:
+    st.markdown("""
+    <div style="padding:18px 0 16px 0;">
+      <div class="brand-title">⚕ Suterup</div>
+      <div class="brand-sub">Surgical Training · v5.1</div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    st.markdown('<div style="border-top:1px solid #1a2838;margin-bottom:12px;"></div>',
+                unsafe_allow_html=True)
+
     page = st.radio(
-        "NAVIGATE",
+        "Navigation",
         ["Live Training", "Session History", "Calibration", "About"],
-        index=["Live Training", "Session History", "Calibration", "About"].index(
-            st.session_state.page
-        ),
-        label_visibility="visible",
+        index=["Live Training","Session History","Calibration","About"].index(
+            st.session_state.page),
+        label_visibility="collapsed",
     )
-    st.session_state.page = page   # persist selected page
+    st.session_state.page = page
 
-    st.markdown("---")
+    st.markdown('<div style="border-top:1px solid #1a2838;margin:12px 0;"></div>',
+                unsafe_allow_html=True)
 
-    # Quick session stats in sidebar
-    st.markdown("""<div class="section-label">Session</div>""", unsafe_allow_html=True)
-    st.metric("Total Stitches", st.session_state.session_total)
-    st.metric("Runs Completed", len(st.session_state.run_history))
+    # Session stats
+    st.markdown('<div class="section-label">Session</div>', unsafe_allow_html=True)
+    col_s1, col_s2 = st.columns(2)
+    col_s1.metric("Stitches", st.session_state.session_total)
+    col_s2.metric("Runs", len(st.session_state.run_history))
 
-    run_color = "#00e09a" if st.session_state.run_active else "#2a4a5a"
-    run_label = "● RECORDING" if st.session_state.run_active else "○ STANDBY"
+    # Recording indicator
+    is_rec = st.session_state.run_active
+    ind_class = "status-live" if is_rec else "status-standby"
+    ind_label = "Recording" if is_rec else "Standby"
     st.markdown(
-        f"<div style='font-size:0.72em;color:{run_color};letter-spacing:0.1em;margin-top:8px;'>{run_label}</div>",
+        f'<div style="font-size:0.7em;color:#2a4050;margin-top:6px;">'
+        f'<span class="status-indicator {ind_class}"></span>{ind_label}</div>',
         unsafe_allow_html=True,
     )
 
-    # Reset session button in sidebar
-    st.markdown("---")
-    if st.button("🔄 Reset Session", key="sidebar_reset"):
-        # Clear all session-specific state
-        st.session_state.run_active    = False
-        st.session_state.run_stitches  = []
-        st.session_state.session_total = 0
-        st.session_state.log_lines     = ["🔄 Session reset"]
-        st.session_state.run_history   = []
+    st.markdown('<div style="border-top:1px solid #1a2838;margin:12px 0;"></div>',
+                unsafe_allow_html=True)
+
+    if st.button("Reset Session", use_container_width=True):
+        for k, v in [("run_active", False), ("run_stitches", []),
+                     ("session_total", 0), ("log_lines", ["Session reset"]),
+                     ("run_history", []), ("last_annotated", None),
+                     ("last_centroids", []), ("live_running", False)]:
+            st.session_state[k] = v
         st.session_state.centroid_history.clear()
-        st.session_state.last_annotated = None
-        st.session_state.last_centroids  = []
-        st.rerun()   # re-render the full page with cleared state
+        st.rerun()
 
     st.markdown("""
-    <div style="position:absolute;bottom:20px;left:20px;font-size:0.65em;color:#0f2535;">
+    <div style="margin-top:20px;font-size:0.6em;color:#111e28;">
         Guneet Singh · Beta
     </div>
     """, unsafe_allow_html=True)
@@ -955,116 +870,71 @@ with st.sidebar:
 if page == "Live Training":
 
     st.markdown("""
-    <div class="page-header">Live Training Feed</div>
-    <div class="page-sub">REAL-TIME SUTURE ANALYSIS · PLACE DOTS IN FRAME · AUTO-AI DETECTION</div>
+    <div class="page-title">Live Training</div>
+    <div class="page-sub">Suture distance analysis · place dots in frame</div>
     """, unsafe_allow_html=True)
 
-    # ── Layout: camera left | controls right ──
-    col_cam, col_ctrl = st.columns([2.2, 1], gap="medium")
+    col_cam, col_ctrl = st.columns([2.2, 1], gap="large")
 
-    with col_cam:
-        # Camera input widget — triggers on each new photo taken
-        # In Streamlit, st.camera_input shows a live viewfinder; user clicks
-        # the shutter to capture. For continuous mode we auto-rerun.
-        camera_file = st.camera_input(
-            label="Point at suture dots and capture",
-            label_visibility="collapsed",
-            key="camera_feed",
-        )
-
-        # Process frame whenever a new capture arrives
-        if camera_file is not None:
-            pil_annotated, centroids = process_camera_frame(camera_file)
-            if pil_annotated:
-                st.image(pil_annotated, caption="Annotated Output", use_container_width=True)
-        elif st.session_state.last_annotated is not None:
-            # Show last frame if no new capture yet (prevents blank screen on rerun)
-            st.image(
-                bgr_to_rgb_pil(st.session_state.last_annotated),
-                caption="Last Frame",
-                use_container_width=True,
-            )
-
-        # ── Live feedback status card ──
-        centroids = st.session_state.last_centroids
-        if len(centroids) >= 2:
-            dists  = [seg_dist(centroids[i], centroids[i + 1]) for i in range(len(centroids) - 1)]
-            scores = [precision_score(d) for d in dists]
-            avg_sc = int(sum(scores) / len(scores))
-            avg_d  = sum(dists) / len(dists)
-            last_d = dists[-1]
-            label, color_bgr, feedback = grade(last_d)
-            hex_col = bgr_to_hex(color_bgr)
-            css_cls = grade_css_class(label)
-
-            # Score bar fill color matches grade
-            bar_color = hex_col
-
-            # Build segment table rows
-            rows_html = ""
-            for i, (d, sc) in enumerate(zip(dists, scores)):
-                gl, gc, _ = grade(d)
-                hc = bgr_to_hex(gc)
-                rows_html += (
-                    f"<tr>"
-                    f"<td style='color:#3a6a8a;padding:3px 8px;'>P{i+1}→P{i+2}</td>"
-                    f"<td style='color:{hc};padding:3px 8px;'>{d:.1f}px</td>"
-                    f"<td style='color:{hc};padding:3px 8px;'>{gl}</td>"
-                    f"<td style='color:{hc};padding:3px 8px;'>{sc}/100</td>"
-                    f"</tr>"
-                )
-
-            st.markdown(f"""
-            <div class="status-card" style="margin-top:12px;">
-                <div style="font-size:1.1em;font-weight:700;color:{hex_col};margin-bottom:4px;">
-                    {label} &nbsp;·&nbsp; {avg_sc}/100
-                </div>
-                <div class="score-bar-wrap">
-                    <div class="score-bar-fill"
-                         style="width:{avg_sc}%;background:{bar_color};"></div>
-                </div>
-                <div style="color:#4a7a9a;font-size:0.78em;margin:8px 0 10px 0;">
-                    💬 {feedback}
-                </div>
-                <table style="width:100%;border-collapse:collapse;font-size:0.76em;">
-                    <tr style="color:#1e4a6a;border-bottom:1px solid #0e2030;">
-                        <td style="padding:3px 8px;">SEG</td>
-                        <td style="padding:3px 8px;">DIST</td>
-                        <td style="padding:3px 8px;">GRADE</td>
-                        <td style="padding:3px 8px;">SCORE</td>
-                    </tr>
-                    {rows_html}
-                </table>
-                <div style="margin-top:10px;color:#2a5a7a;font-size:0.73em;">
-                    AVG DIST: <span style="color:#5bc4f5;">{avg_d:.1f}px</span>
-                    &nbsp;·&nbsp;
-                    DOTS: <span style="color:#5bc4f5;">{len(centroids)}</span>
-                    &nbsp;·&nbsp;
-                    SESSION TOTAL: <span style="color:#5bc4f5;">{st.session_state.session_total}</span>
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
-
-        elif len(centroids) == 1:
-            st.markdown("""
-            <div class="status-card" style="color:#f5d05b;margin-top:12px;">
-                ⚠ 1 dot detected — need at least 2 to measure distance
-            </div>
-            """, unsafe_allow_html=True)
-        elif camera_file is not None:
-            st.markdown("""
-            <div class="status-card" style="color:#4a8aaa;margin-top:12px;">
-                ⚠ No dots detected — try Auto-Tune HSV or adjust Calibration
-            </div>
-            """, unsafe_allow_html=True)
-
+    # ── RIGHT COLUMN: controls ──────────────────────────────────────────
     with col_ctrl:
-        # ── Session control panel ──
-        st.markdown('<div class="section-label">Session Controls</div>', unsafe_allow_html=True)
 
-        c1, c2 = st.columns(2)
-        with c1:
-            # Start button: disabled if already recording
+        # ── MODE SELECTOR ──
+        st.markdown('<div class="section-label">Camera Mode</div>', unsafe_allow_html=True)
+        mode_col1, mode_col2 = st.columns(2)
+
+        with mode_col1:
+            snap_active = st.session_state.cam_mode == "snapshot"
+            if st.button(
+                "Snapshot" + (" ●" if snap_active else ""),
+                key="btn_mode_snap",
+                use_container_width=True,
+                help="Take one photo and analyse it instantly"
+            ):
+                st.session_state.cam_mode    = "snapshot"
+                st.session_state.live_running = False
+                st.rerun()
+
+        with mode_col2:
+            live_active = st.session_state.cam_mode == "live"
+            if st.button(
+                "Live" + (" ●" if live_active else ""),
+                key="btn_mode_live",
+                use_container_width=True,
+                help="Continuous feed — analyses every new capture automatically"
+            ):
+                st.session_state.cam_mode = "live"
+                st.rerun()
+
+        # Mode description card
+        if st.session_state.cam_mode == "snapshot":
+            st.markdown("""
+            <div class="card" style="font-size:0.72em;color:#2a4a5a;margin-top:6px;">
+              <b style="color:#4a7a8a;">Snapshot mode</b><br>
+              Click the camera shutter button to capture one frame.
+              The frame is analysed instantly and results appear below.
+            </div>
+            """, unsafe_allow_html=True)
+        else:
+            live_status = "running" if st.session_state.live_running else "paused"
+            status_col = "#b85a5a" if st.session_state.live_running else "#2a4a5a"
+            st.markdown(f"""
+            <div class="card" style="font-size:0.72em;color:#2a4a5a;margin-top:6px;">
+              <b style="color:{status_col};">Live mode · {live_status}</b><br>
+              Camera captures continuously. Click the shutter to start,
+              then use Start/Stop below to control the loop.
+            </div>
+            """, unsafe_allow_html=True)
+
+        st.markdown('<div style="height:4px;"></div>', unsafe_allow_html=True)
+        st.markdown('<div style="border-top:1px solid #1a2838;margin:10px 0;"></div>',
+                    unsafe_allow_html=True)
+
+        # ── SESSION CONTROLS ──
+        st.markdown('<div class="section-label">Session</div>', unsafe_allow_html=True)
+
+        run_col1, run_col2 = st.columns(2)
+        with run_col1:
             if st.button("▶ Start Run",
                          disabled=st.session_state.run_active,
                          key="btn_start",
@@ -1073,91 +943,70 @@ if page == "Live Training":
                 st.session_state.run_stitches = []
                 st.session_state.centroid_history.clear()
                 ts = datetime.now().strftime("%H:%M:%S")
-                st.session_state.log_lines.append(f"🟢 [{ts}] Run started")
+                st.session_state.log_lines.append(f"[{ts}] Run started")
                 st.rerun()
 
-        with c2:
-            # End button: disabled if not recording
+        with run_col2:
             if st.button("⏹ End Run",
                          disabled=not st.session_state.run_active,
                          key="btn_end",
                          use_container_width=True):
-                st.session_state.run_active = False
+                st.session_state.run_active   = False
+                st.session_state.live_running = False
                 run_s = st.session_state.run_stitches
                 ts = datetime.now().strftime("%H:%M:%S")
                 if run_s:
                     s_scores = [s["sc"] for s in run_s]
                     s_dists  = [s["d"]  for s in run_s]
                     optimal  = sum(1 for s in run_s if 60 <= s["d"] <= 120)
-                    avg_run  = int(sum(s_scores) / max(1, len(s_scores)))
-                    # Archive completed run summary to history
+                    avg_run  = int(sum(s_scores)/max(1,len(s_scores)))
                     st.session_state.run_history.append({
-                        "ts": ts,
-                        "stitches": len(run_s),
-                        "avg_score": avg_run,
-                        "optimal": optimal,
-                        "best":  max(s_scores),
-                        "worst": min(s_scores),
-                        "avg_dist": sum(s_dists) / max(1, len(s_dists)),
+                        "ts": ts, "stitches": len(run_s),
+                        "avg_score": avg_run, "optimal": optimal,
+                        "best": max(s_scores), "worst": min(s_scores),
+                        "avg_dist": sum(s_dists)/max(1,len(s_dists)),
                     })
                     st.session_state.log_lines += [
-                        "━" * 28,
-                        f"🏁 [{ts}] RUN COMPLETE",
-                        f"   Stitches : {len(run_s)}",
-                        f"   Avg score: {avg_run}/100",
-                        f"   Optimal  : {optimal}/{len(run_s)}",
-                        "━" * 28,
+                        "─" * 24,
+                        f"[{ts}] Run complete — {len(run_s)} stitches, avg {avg_run}/100",
+                        "─" * 24,
                     ]
                 st.session_state.run_stitches = []
                 st.rerun()
 
-        st.markdown("<div style='height:8px;'></div>", unsafe_allow_html=True)
+        st.markdown('<div style="height:4px;"></div>', unsafe_allow_html=True)
 
-        # Log current frame button
-        if st.button("📌 Log Current Frame",
+        # Log frame button — works in both modes
+        if st.button("📌 Log This Frame",
                      disabled=not st.session_state.run_active,
                      key="btn_log",
                      use_container_width=True):
-            cents = st.session_state.last_centroids
-            if len(cents) < 2:
-                st.session_state.log_lines.append("⚠ Log skipped — fewer than 2 dots")
-            else:
-                ts = datetime.now().strftime("%H:%M:%S")
-                count = 0
-                for i in range(len(cents) - 1):
-                    d  = seg_dist(cents[i], cents[i + 1])
-                    sc = precision_score(d)
-                    gl, _, _ = grade(d)
-                    st.session_state.run_stitches.append({"d": d, "sc": sc})
-                    st.session_state.session_total += 1
-                    count += 1
-                    st.session_state.log_lines.append(
-                        f"📌 [{ts}] #{st.session_state.session_total} P{i+1}→P{i+2} "
-                        f"| {d:.1f}px | {gl} | {sc}/100"
-                    )
-                st.session_state.log_lines.append(f"✅ {count} stitch(es) saved")
+            n = log_frame()
+            if n > 0:
+                st.toast(f"{n} stitch(es) logged")
             st.rerun()
 
-        st.markdown("---")
+        st.markdown('<div style="border-top:1px solid #1a2838;margin:10px 0;"></div>',
+                    unsafe_allow_html=True)
 
-        # ── Auto-HSV section ──
-        st.markdown('<div class="section-label">AI Detection</div>', unsafe_allow_html=True)
+        # ── AUTO-HSV ──
+        st.markdown('<div class="section-label">Detection</div>', unsafe_allow_html=True)
 
-        hsv_mode_map = {"default": "Default", "auto": "Auto-Tuned ✓", "manual": "Manual Override"}
+        hsv_labels = {"default": "Default", "auto": "Auto ✓", "manual": "Manual"}
         st.markdown(
-            f"<div style='font-size:0.72em;color:#2a6a8a;margin-bottom:8px;'>"
-            f"Mode: <span style='color:#5bc4f5;'>{hsv_mode_map.get(st.session_state.hsv_source,'?')}</span>"
-            f"</div>",
+            f'<div style="font-size:0.68em;color:#1e3a4a;margin-bottom:8px;">'
+            f'Mode: <span style="color:#4a7a8a;">{hsv_labels.get(st.session_state.hsv_source,"?")}</span>'
+            f'</div>',
             unsafe_allow_html=True,
         )
 
-        if st.button("🤖 Auto-Tune HSV", key="btn_autotune", use_container_width=True):
-            cam = st.session_state.get("camera_feed")   # last captured frame
+        if st.button("Auto-Tune HSV", key="btn_autotune", use_container_width=True):
+            cam = st.session_state.get("main_camera")
             bgr = camera_to_bgr(cam)
             if bgr is None:
-                st.warning("Capture a frame first — point camera at dots then click Auto-Tune")
+                st.warning("Capture a frame first, then click Auto-Tune.")
             else:
-                with st.spinner("Running 6-pass Auto-HSV..."):
+                with st.spinner("Analysing frame..."):
                     result = auto_tune_hsv(bgr)
                 if result:
                     st.session_state.hsv = {k: result[k] for k in
@@ -1167,41 +1016,143 @@ if page == "Live Training":
                     st.session_state.hsv_source   = "auto"
                     st.session_state.auto_hsv_result = result
                     st.session_state.centroid_history.clear()
-                    st.success(
-                        f"✅ Auto-HSV complete — hue peak H={result['peak_hue']}° · "
-                        f"{result['valid_blobs']} dots validated"
-                    )
+                    st.success(f"Done — hue peak {result['peak_hue']}°, {result['valid_blobs']} blobs")
                 else:
-                    st.error("Auto-tune failed — improve lighting or move closer to dots")
+                    st.error("Failed — check lighting and move closer.")
 
-        # Show auto-tune diagnostic if available
         if st.session_state.auto_hsv_result:
             r = st.session_state.auto_hsv_result
-            with st.expander("📊 Auto-tune Diagnostic", expanded=False):
+            with st.expander("Tune diagnostic"):
                 st.markdown(f"""
-                <div style="font-size:0.74em;color:#5aaabf;line-height:2;">
-                  Peak hue: <span style="color:#5bc4f5;">{r['peak_hue']}°</span><br>
-                  Hue spread: ±{r['spread']}px · window: {r['h_min']}–{r['h_max']}<br>
-                  S min: {r['s_min']} · V min: {r['v_min']}<br>
-                  Blob area: {r['min_area']}–{r['max_area']} px²<br>
-                  Valid blobs found: <span style="color:#5bc4f5;">{r['valid_blobs']}</span>
+                <div style="font-size:0.72em;color:#3a6070;line-height:1.9;">
+                  Peak hue: {r['peak_hue']}° · spread: ±{r['spread']}<br>
+                  H: {r['h_min']}–{r['h_max']} · S min: {r['s_min']} · V min: {r['v_min']}<br>
+                  Area: {r['min_area']}–{r['max_area']}px² · blobs: {r['valid_blobs']}
                 </div>
                 """, unsafe_allow_html=True)
 
-        st.markdown("---")
+        st.markdown('<div style="border-top:1px solid #1a2838;margin:10px 0;"></div>',
+                    unsafe_allow_html=True)
 
-        # ── Setup tips ──
-        st.markdown('<div class="section-label">Setup Tips</div>', unsafe_allow_html=True)
+        # ── TIPS ──
+        st.markdown('<div class="section-label">Setup</div>', unsafe_allow_html=True)
         st.markdown("""
-        <div style="font-size:0.72em;color:#2a5a7a;line-height:2;">
-          • Use <span style="color:#7aaac8;">blue, red, or green stickers</span><br>
-          • Even lighting — no shadows on dots<br>
-          • Space dots <span style="color:#7aaac8;">1–3 cm</span> apart<br>
-          • Click <span style="color:#5bc4f5;">Auto-Tune HSV</span> first<br>
-          • OPTIMAL = 60–120px between dots<br>
-          • Capture frame → auto processes instantly
+        <div style="font-size:0.7em;color:#1e3a4a;line-height:2;">
+          Use round coloured stickers (blue, green, red)<br>
+          Even lighting — avoid shadows on dots<br>
+          Space dots 1–3 cm apart<br>
+          Run Auto-Tune first<br>
+          Optimal range = 60–120px
         </div>
         """, unsafe_allow_html=True)
+
+    # ── LEFT COLUMN: camera + output ────────────────────────────────────
+    with col_cam:
+
+        # ────────────────────────────────────────────────────────────────
+        #  SNAPSHOT MODE
+        # ────────────────────────────────────────────────────────────────
+        if st.session_state.cam_mode == "snapshot":
+
+            # Single camera widget — user clicks shutter to capture
+            snap_file = st.camera_input(
+                label="Snapshot",
+                label_visibility="collapsed",
+                key="main_camera",
+            )
+
+            if snap_file is not None:
+                # New photo taken — process it immediately
+                pil_out, centroids = process_frame(snap_file)
+                if pil_out:
+                    st.image(pil_out, use_container_width=True, caption=None)
+                render_score_card(st.session_state.last_centroids)
+
+            elif st.session_state.last_annotated is not None:
+                # No new photo yet — show last processed result
+                st.image(bgr_to_pil(st.session_state.last_annotated),
+                         use_container_width=True, caption=None)
+                render_score_card(st.session_state.last_centroids)
+            else:
+                # First load — show placeholder
+                st.markdown("""
+                <div class="card" style="text-align:center;padding:40px 20px;color:#1e3a4a;">
+                  Click the shutter button above to take a photo<br>
+                  <span style="font-size:0.8em;color:#162838;">
+                    Dots will be detected and analysed instantly
+                  </span>
+                </div>
+                """, unsafe_allow_html=True)
+
+        # ────────────────────────────────────────────────────────────────
+        #  LIVE MODE
+        #  Streamlit doesn't support true video streaming, so we simulate
+        #  it by auto-calling st.rerun() every ~0.5s while live_running=True.
+        #  The camera_input widget re-captures each rerun cycle.
+        # ────────────────────────────────────────────────────────────────
+        else:
+            # Start / Stop live loop buttons
+            live_btn_col1, live_btn_col2 = st.columns(2)
+            with live_btn_col1:
+                if st.button(
+                    "▶ Start Live",
+                    disabled=st.session_state.live_running,
+                    key="btn_live_start",
+                    use_container_width=True,
+                ):
+                    st.session_state.live_running = True
+                    st.rerun()
+
+            with live_btn_col2:
+                if st.button(
+                    "⏹ Stop Live",
+                    disabled=not st.session_state.live_running,
+                    key="btn_live_stop",
+                    use_container_width=True,
+                ):
+                    st.session_state.live_running = False
+                    st.rerun()
+
+            # Live status bar
+            if st.session_state.live_running:
+                st.markdown("""
+                <div style="font-size:0.68em;color:#6a3030;letter-spacing:0.08em;margin:4px 0 8px 0;">
+                  <span class="status-indicator status-live"></span>LIVE · capturing continuously
+                </div>
+                """, unsafe_allow_html=True)
+            else:
+                st.markdown("""
+                <div style="font-size:0.68em;color:#1e3040;letter-spacing:0.08em;margin:4px 0 8px 0;">
+                  <span class="status-indicator status-standby"></span>Stopped
+                </div>
+                """, unsafe_allow_html=True)
+
+            # Camera widget — always present in live mode so browser keeps stream open
+            live_file = st.camera_input(
+                label="Live feed",
+                label_visibility="collapsed",
+                key="main_camera",
+            )
+
+            if live_file is not None:
+                # Process every captured frame
+                pil_out, centroids = process_frame(live_file)
+                if pil_out:
+                    st.image(pil_out, use_container_width=True, caption=None)
+                render_score_card(st.session_state.last_centroids)
+
+            elif st.session_state.last_annotated is not None:
+                # Show last frame while waiting for next capture
+                st.image(bgr_to_pil(st.session_state.last_annotated),
+                         use_container_width=True, caption=None)
+                render_score_card(st.session_state.last_centroids)
+
+            # Auto-rerun loop: if live is running, wait 0.45s then rerun
+            # This forces Streamlit to re-execute the script, which re-triggers
+            # the camera widget and processes the next frame.
+            if st.session_state.live_running:
+                time.sleep(0.45)
+                st.rerun()
 
 # ─────────────────────────────────────────────────────
 #  PAGE: SESSION HISTORY
@@ -1209,95 +1160,83 @@ if page == "Live Training":
 elif page == "Session History":
 
     st.markdown("""
-    <div class="page-header">Session History</div>
-    <div class="page-sub">LOGGED STITCHES · RUN SUMMARIES · SCORE TRENDS</div>
+    <div class="page-title">Session History</div>
+    <div class="page-sub">Run summaries · score trends · event log</div>
     """, unsafe_allow_html=True)
 
     if not st.session_state.run_history and not st.session_state.log_lines:
         st.markdown("""
-        <div class="status-card" style="color:#2a5a7a;text-align:center;padding:40px;">
-            No data yet — complete a run on the Live Training page.
+        <div class="card" style="text-align:center;padding:40px;color:#1e3a4a;">
+          No data yet — complete a run on the Live Training page.
         </div>
         """, unsafe_allow_html=True)
     else:
-        # ── Summary metrics ──
-        col_m1, col_m2, col_m3, col_m4 = st.columns(4)
-        with col_m1:
-            st.metric("Total Stitches", st.session_state.session_total)
-        with col_m2:
-            st.metric("Runs Completed", len(st.session_state.run_history))
-        with col_m3:
-            if st.session_state.run_history:
-                avg_scores = [r["avg_score"] for r in st.session_state.run_history]
-                st.metric("Avg Score", f"{int(sum(avg_scores)/len(avg_scores))}/100")
-            else:
-                st.metric("Avg Score", "—")
-        with col_m4:
-            if st.session_state.run_history:
-                opt_rates = [r["optimal"] / max(1, r["stitches"]) * 100
-                             for r in st.session_state.run_history]
-                st.metric("Optimal Rate", f"{int(sum(opt_rates)/len(opt_rates))}%")
-            else:
-                st.metric("Optimal Rate", "—")
-
-        st.markdown("---")
-
-        # ── Score trend chart ──
-        if len(st.session_state.run_history) >= 1:
-            st.markdown('<div class="section-label">Score Trend by Run</div>', unsafe_allow_html=True)
-            chart_data = {
-                "Run": [f"Run {i+1}" for i, _ in enumerate(st.session_state.run_history)],
-                "Avg Score": [r["avg_score"] for r in st.session_state.run_history],
-            }
-            # st.bar_chart expects a dict or dataframe; index = x axis
-            import pandas as pd
-            df = pd.DataFrame(chart_data).set_index("Run")
-            st.bar_chart(df, color="#5bc4f5", height=220)
-
-        st.markdown("---")
-
-        # ── Run history table ──
+        # Summary metrics row
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Total Stitches", st.session_state.session_total)
+        m2.metric("Runs", len(st.session_state.run_history))
         if st.session_state.run_history:
+            avg_scores = [r["avg_score"] for r in st.session_state.run_history]
+            m3.metric("Avg Score", f"{int(sum(avg_scores)/len(avg_scores))}/100")
+            opt_rates  = [r["optimal"]/max(1,r["stitches"])*100 for r in st.session_state.run_history]
+            m4.metric("Optimal Rate", f"{int(sum(opt_rates)/len(opt_rates))}%")
+        else:
+            m3.metric("Avg Score", "—")
+            m4.metric("Optimal Rate", "—")
+
+        st.markdown('<div style="border-top:1px solid #1a2838;margin:16px 0;"></div>',
+                    unsafe_allow_html=True)
+
+        # Score trend chart
+        if st.session_state.run_history:
+            st.markdown('<div class="section-label">Score by Run</div>', unsafe_allow_html=True)
+            import pandas as pd
+            df = pd.DataFrame({
+                "Run": [f"Run {i+1}" for i in range(len(st.session_state.run_history))],
+                "Avg Score": [r["avg_score"] for r in st.session_state.run_history],
+            }).set_index("Run")
+            st.bar_chart(df, color="#4a7a8a", height=200)
+
+            st.markdown('<div style="border-top:1px solid #1a2838;margin:16px 0;"></div>',
+                        unsafe_allow_html=True)
+
             st.markdown('<div class="section-label">Run Summaries</div>', unsafe_allow_html=True)
             for i, r in enumerate(reversed(st.session_state.run_history)):
-                grade_color = "#00e09a" if r["avg_score"] >= 70 else "#f5d05b" if r["avg_score"] >= 40 else "#f07070"
-                opt_pct = int(r["optimal"] / max(1, r["stitches"]) * 100)
-                with st.expander(f"Run {len(st.session_state.run_history) - i} · {r['ts']} · Avg {r['avg_score']}/100"):
+                n = len(st.session_state.run_history) - i
+                opt_pct = int(r["optimal"]/max(1,r["stitches"])*100)
+                with st.expander(f"Run {n}  ·  {r['ts']}  ·  {r['avg_score']}/100"):
                     c1, c2, c3 = st.columns(3)
                     c1.metric("Stitches", r["stitches"])
                     c2.metric("Optimal", f"{r['optimal']}/{r['stitches']} ({opt_pct}%)")
                     c3.metric("Avg Dist", f"{r['avg_dist']:.1f}px")
                     cc1, cc2 = st.columns(2)
-                    cc1.metric("Best Score", f"{r['best']}/100")
-                    cc2.metric("Worst Score", f"{r['worst']}/100")
+                    cc1.metric("Best", f"{r['best']}/100")
+                    cc2.metric("Worst", f"{r['worst']}/100")
 
-        st.markdown("---")
-
-        # ── Stitch event log ──
-        st.markdown('<div class="section-label">Event Log</div>', unsafe_allow_html=True)
+        # Event log
         if st.session_state.log_lines:
-            # Build HTML scrollable log
-            log_html = "<div class='log-scroll'>"
-            for line in reversed(st.session_state.log_lines[-60:]):
-                log_html += f"<div class='log-line'>{line}</div>"
-            log_html += "</div>"
-            st.markdown(log_html, unsafe_allow_html=True)
+            st.markdown('<div style="border-top:1px solid #1a2838;margin:16px 0;"></div>',
+                        unsafe_allow_html=True)
+            st.markdown('<div class="section-label">Event Log</div>', unsafe_allow_html=True)
+            lines_html = "".join(
+                f'<div class="log-line">{l}</div>'
+                for l in reversed(st.session_state.log_lines[-60:])
+            )
+            st.markdown(f'<div class="log-box">{lines_html}</div>', unsafe_allow_html=True)
 
-        st.markdown("---")
-
-        # ── Export ──
-        st.markdown('<div class="section-label">Export</div>', unsafe_allow_html=True)
-        if st.button("⬇ Export Session JSON"):
-            export_data = {
-                "export_time": datetime.now().isoformat(),
+        # Export
+        st.markdown('<div style="border-top:1px solid #1a2838;margin:16px 0;"></div>',
+                    unsafe_allow_html=True)
+        if st.button("Export Session JSON"):
+            payload = {
+                "exported": datetime.now().isoformat(),
                 "session_total": st.session_state.session_total,
-                "run_history": st.session_state.run_history,
-                "log": st.session_state.log_lines,
+                "run_history":   st.session_state.run_history,
+                "log":           st.session_state.log_lines,
             }
-            json_str = json.dumps(export_data, indent=2)
             st.download_button(
-                label="💾 Download JSON",
-                data=json_str,
+                "Download JSON",
+                data=json.dumps(payload, indent=2),
                 file_name=f"suterup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
                 mime="application/json",
             )
@@ -1308,119 +1247,97 @@ elif page == "Session History":
 elif page == "Calibration":
 
     st.markdown("""
-    <div class="page-header">Calibration</div>
-    <div class="page-sub">MANUAL HSV CONTROL · MASK DIAGNOSTIC · AREA TUNING</div>
+    <div class="page-title">Calibration</div>
+    <div class="page-sub">Manual HSV control · mask preview</div>
     """, unsafe_allow_html=True)
 
-    col_sliders, col_preview = st.columns([1, 1.5], gap="medium")
+    col_sl, col_prev = st.columns([1, 1.6], gap="large")
 
-    with col_sliders:
+    with col_sl:
         st.markdown('<div class="section-label">HSV Range</div>', unsafe_allow_html=True)
+        h = st.session_state.hsv
 
-        h = st.session_state.hsv   # current HSV dict
-
-        # Each slider maps to an HSV channel bound.
-        # OpenCV uses H: 0-179 (half of 360° wheel), S/V: 0-255.
-        new_h_min = st.slider("Hue Min (H°)",     0, 179, h["h_min"], 1,
-                              help="Lower bound of accepted hue — shift if dots aren't detected")
-        new_h_max = st.slider("Hue Max (H°)",     0, 179, h["h_max"], 1,
-                              help="Upper bound of accepted hue")
-        new_s_min = st.slider("Saturation Min",   0, 255, h["s_min"], 1,
-                              help="Raise to reject washed-out/white areas")
-        new_s_max = st.slider("Saturation Max",   0, 255, h["s_max"], 1)
-        new_v_min = st.slider("Value (Brightness) Min", 0, 255, h["v_min"], 1,
-                              help="Raise to reject dark shadows")
-        new_v_max = st.slider("Value Max",        0, 255, h["v_max"], 1)
+        # Each slider: H is 0-179 (OpenCV half-degree scale), S/V are 0-255
+        h_min = st.slider("Hue min",         0, 179, h["h_min"], 1)
+        h_max = st.slider("Hue max",         0, 179, h["h_max"], 1)
+        s_min = st.slider("Saturation min",  0, 255, h["s_min"], 1)
+        s_max = st.slider("Saturation max",  0, 255, h["s_max"], 1)
+        v_min = st.slider("Brightness min",  0, 255, h["v_min"], 1)
+        v_max = st.slider("Brightness max",  0, 255, h["v_max"], 1)
 
         st.markdown('<div class="section-label" style="margin-top:12px;">Blob Area (px²)</div>',
                     unsafe_allow_html=True)
         a = st.session_state.area
-        new_min_a = st.slider("Min blob area",   10, 3000, a["min_area"], 10,
-                              help="Increase to reject small noise specks")
-        new_max_a = st.slider("Max blob area",  200, 25000, a["max_area"], 100,
-                              help="Decrease to reject large false-positive regions")
+        min_a = st.slider("Min area",  10, 3000,  a["min_area"], 10)
+        max_a = st.slider("Max area", 200, 25000, a["max_area"], 100)
 
-        if st.button("✅ Apply Manual HSV", use_container_width=True):
-            # Write slider values back into session state
-            st.session_state.hsv = dict(
-                h_min=new_h_min, h_max=new_h_max,
-                s_min=new_s_min, s_max=new_s_max,
-                v_min=new_v_min, v_max=new_v_max,
-            )
-            st.session_state.area = dict(min_area=new_min_a, max_area=new_max_a)
-            st.session_state.hsv_source = "manual"
-            st.session_state.centroid_history.clear()   # clear smooth buffer after parameter change
-            st.success("Manual HSV applied")
-            st.rerun()
+        col_b1, col_b2 = st.columns(2)
+        with col_b1:
+            if st.button("Apply", use_container_width=True):
+                st.session_state.hsv = dict(
+                    h_min=h_min, h_max=h_max,
+                    s_min=s_min, s_max=s_max,
+                    v_min=v_min, v_max=v_max,
+                )
+                st.session_state.area = dict(min_area=min_a, max_area=max_a)
+                st.session_state.hsv_source = "manual"
+                st.session_state.centroid_history.clear()
+                st.success("Applied")
+                st.rerun()
+        with col_b2:
+            if st.button("Defaults", use_container_width=True):
+                st.session_state.hsv  = dict(h_min=90, h_max=130, s_min=80, s_max=255, v_min=50, v_max=255)
+                st.session_state.area = dict(min_area=200, max_area=8000)
+                st.session_state.hsv_source = "default"
+                st.session_state.centroid_history.clear()
+                st.rerun()
 
-        if st.button("↩ Reset to Defaults", use_container_width=True):
-            st.session_state.hsv = dict(h_min=90, h_max=130, s_min=80, s_max=255, v_min=50, v_max=255)
-            st.session_state.area = dict(min_area=200, max_area=8000)
-            st.session_state.hsv_source = "default"
-            st.session_state.centroid_history.clear()
-            st.rerun()
-
-    with col_preview:
-        st.markdown('<div class="section-label">Live Mask Preview</div>', unsafe_allow_html=True)
         st.markdown("""
-        <div style="font-size:0.72em;color:#2a5a7a;margin-bottom:10px;">
-            Capture a frame below — the mask shows what the AI sees (white = detected dot region).
-            You want clean white blobs, minimal noise.
+        <div style="margin-top:14px;font-size:0.68em;color:#1a3040;line-height:2;">
+          Red: 0–10 or 160–179<br>
+          Orange: 10–25 · Yellow: 25–35<br>
+          Green: 35–85 · Cyan: 85–100<br>
+          Blue: 100–130 · Purple: 130–160
         </div>
         """, unsafe_allow_html=True)
 
-        cal_cam = st.camera_input("Calibration Camera", label_visibility="collapsed",
-                                  key="cal_camera")
+    with col_prev:
+        st.markdown('<div class="section-label">Mask Preview</div>', unsafe_allow_html=True)
+        st.markdown("""
+        <div style="font-size:0.7em;color:#1e3a4a;margin-bottom:10px;">
+          Capture a frame — white areas show what the algorithm detects.
+          Adjust sliders until only the dots appear white.
+        </div>
+        """, unsafe_allow_html=True)
+
+        cal_cam = st.camera_input("Cal camera", label_visibility="collapsed", key="cal_camera")
         if cal_cam is not None:
             bgr = camera_to_bgr(cal_cam)
             if bgr is not None:
                 try:
-                    # Apply current (possibly slider-edited) HSV to a temporary mask
-                    temp_hsv = dict(
-                        h_min=new_h_min, h_max=new_h_max,
-                        s_min=new_s_min, s_max=new_s_max,
-                        v_min=new_v_min, v_max=new_v_max,
-                    )
-                    mask = _build_mask_internal(
-                        bgr,
-                        temp_hsv["h_min"], temp_hsv["h_max"],
-                        temp_hsv["s_min"], temp_hsv["s_max"],
-                        temp_hsv["v_min"], temp_hsv["v_max"],
-                    )
-                    # Convert binary mask (0/255) to RGB for display
-                    # White = detected, black = rejected
+                    # Build mask with current slider values (not yet applied to state)
+                    mask = _build_mask_internal(bgr, h_min, h_max, s_min, s_max, v_min, v_max)
                     mask_rgb = cv2.cvtColor(mask, cv2.COLOR_GRAY2RGB)
+                    # Stack original + mask side by side
+                    combined = np.hstack([cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB), mask_rgb])
+                    st.image(combined, use_container_width=True,
+                             caption="Original (left) · Detected mask (right)")
 
-                    # Side-by-side: original + mask
-                    combined = np.hstack([
-                        cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB),   # original in RGB
-                        mask_rgb,                                 # mask preview
-                    ])
-                    st.image(combined, caption="Original (left) · Mask (right)", use_container_width=True)
-
-                    # Count blobs in current mask for quick feedback
+                    # Count valid blobs with current slider settings
                     cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-                    valid = sum(1 for c in cnts
-                                if new_min_a <= cv2.contourArea(c) <= new_max_a
-                                and cv2.arcLength(c, True) > 0
-                                and 4 * math.pi * cv2.contourArea(c) / (cv2.arcLength(c, True)**2) >= 0.20)
+                    valid = sum(
+                        1 for c in cnts
+                        if min_a <= cv2.contourArea(c) <= max_a
+                        and cv2.arcLength(c, True) > 0
+                        and (4*math.pi*cv2.contourArea(c)/cv2.arcLength(c,True)**2) >= 0.20
+                    )
                     st.markdown(
-                        f"<div style='font-size:0.8em;color:#5bc4f5;margin-top:8px;'>"
-                        f"✓ {valid} valid blob(s) detected with current settings"
-                        f"</div>",
+                        f'<div style="font-size:0.76em;color:#4a7a8a;margin-top:6px;">'
+                        f'{valid} valid blob(s) with current settings</div>',
                         unsafe_allow_html=True,
                     )
                 except Exception as e:
-                    st.error(f"Mask preview error: {e}")
-
-        st.markdown("""
-        <div style="font-size:0.72em;color:#1e4a6a;margin-top:16px;line-height:1.9;">
-            <b style="color:#3a7aaa;">Hue reference guide:</b><br>
-            Red: 0–10 or 160–179 &nbsp;·&nbsp; Orange: 10–25<br>
-            Yellow: 25–35 &nbsp;·&nbsp; Green: 35–85 &nbsp;·&nbsp; Cyan: 85–100<br>
-            Blue: 100–130 &nbsp;·&nbsp; Purple: 130–160
-        </div>
-        """, unsafe_allow_html=True)
+                    st.error(f"Mask error: {e}")
 
 # ─────────────────────────────────────────────────────
 #  PAGE: ABOUT
@@ -1428,93 +1345,87 @@ elif page == "Calibration":
 elif page == "About":
 
     st.markdown("""
-    <div class="page-header">About Suterup</div>
-    <div class="page-sub">TECH STACK · SCORING GUIDE · TIPS · VERSION HISTORY</div>
+    <div class="page-title">About</div>
+    <div class="page-sub">Scoring guide · tech stack · version notes</div>
     """, unsafe_allow_html=True)
 
     tab1, tab2, tab3 = st.tabs(["Scoring Guide", "Tech Stack", "Version Notes"])
 
     with tab1:
         st.markdown("""
-        <div class="status-card">
-            <div style="font-size:0.85em;font-weight:600;color:#5bc4f5;margin-bottom:12px;letter-spacing:0.08em;">
-                SUTURE SCORING RUBRIC
-            </div>
-
-            <table style="width:100%;border-collapse:collapse;font-size:0.8em;">
-                <tr style="color:#1e4a6a;border-bottom:1px solid #0e2030;">
-                    <td style="padding:6px 10px;">Range (px)</td>
-                    <td style="padding:6px 10px;">Grade</td>
-                    <td style="padding:6px 10px;">Score</td>
-                    <td style="padding:6px 10px;">Clinical Meaning</td>
-                </tr>
-                <tr>
-                    <td style="padding:6px 10px;color:#4a8aaa;">&lt; 40px</td>
-                    <td style="padding:6px 10px;" class="grade-danger">TOO CLOSE</td>
-                    <td style="padding:6px 10px;color:#4a8aaa;">0–55</td>
-                    <td style="padding:6px 10px;color:#3a6a7a;">Risk of tissue necrosis</td>
-                </tr>
-                <tr>
-                    <td style="padding:6px 10px;color:#4a8aaa;">40–60px</td>
-                    <td style="padding:6px 10px;" class="grade-short">SHORT</td>
-                    <td style="padding:6px 10px;color:#4a8aaa;">55–77</td>
-                    <td style="padding:6px 10px;color:#3a6a7a;">Slightly under-spaced</td>
-                </tr>
-                <tr>
-                    <td style="padding:6px 10px;color:#4a8aaa;">60–120px</td>
-                    <td style="padding:6px 10px;" class="grade-optimal">OPTIMAL ✓</td>
-                    <td style="padding:6px 10px;color:#4a8aaa;">77–100</td>
-                    <td style="padding:6px 10px;color:#3a6a7a;">Ideal suture spacing</td>
-                </tr>
-                <tr>
-                    <td style="padding:6px 10px;color:#4a8aaa;">120–160px</td>
-                    <td style="padding:6px 10px;" class="grade-wide">WIDE</td>
-                    <td style="padding:6px 10px;color:#4a8aaa;">55–77</td>
-                    <td style="padding:6px 10px;color:#3a6a7a;">Wound gap risk</td>
-                </tr>
-                <tr>
-                    <td style="padding:6px 10px;color:#4a8aaa;">&gt; 160px</td>
-                    <td style="padding:6px 10px;" class="grade-danger">TOO WIDE</td>
-                    <td style="padding:6px 10px;color:#4a8aaa;">0–55</td>
-                    <td style="padding:6px 10px;color:#3a6a7a;">Closure failure risk</td>
-                </tr>
-            </table>
-
-            <div style="margin-top:14px;font-size:0.74em;color:#2a5a7a;">
-                * Pixel distances are calibrated for a standard webcam at ~25–35cm from the suture model.
-                Distances scale with camera distance — move closer for finer measurements.
-            </div>
+        <div class="card">
+          <div style="font-size:0.82em;font-weight:600;color:#c8dce8;
+                      margin-bottom:12px;letter-spacing:0.06em;">
+            Suture Scoring Rubric
+          </div>
+          <table style="width:100%;border-collapse:collapse;font-size:0.76em;">
+            <tr style="color:#1a3040;border-bottom:1px solid #0e1820;">
+              <td style="padding:6px 10px;">Range</td>
+              <td style="padding:6px 10px;">Grade</td>
+              <td style="padding:6px 10px;">Score</td>
+              <td style="padding:6px 10px;">Clinical note</td>
+            </tr>
+            <tr>
+              <td style="padding:6px 10px;color:#3a6070;">&lt; 40px</td>
+              <td class="grade-danger" style="padding:6px 10px;">Too Close</td>
+              <td style="padding:6px 10px;color:#3a6070;">0–55</td>
+              <td style="padding:6px 10px;color:#2a4050;">Risk of tissue necrosis</td>
+            </tr>
+            <tr>
+              <td style="padding:6px 10px;color:#3a6070;">40–60px</td>
+              <td class="grade-warn" style="padding:6px 10px;">Short</td>
+              <td style="padding:6px 10px;color:#3a6070;">55–77</td>
+              <td style="padding:6px 10px;color:#2a4050;">Slightly under-spaced</td>
+            </tr>
+            <tr>
+              <td style="padding:6px 10px;color:#3a6070;">60–120px</td>
+              <td class="grade-optimal" style="padding:6px 10px;">Optimal ✓</td>
+              <td style="padding:6px 10px;color:#3a6070;">77–100</td>
+              <td style="padding:6px 10px;color:#2a4050;">Ideal spacing</td>
+            </tr>
+            <tr>
+              <td style="padding:6px 10px;color:#3a6070;">120–160px</td>
+              <td class="grade-warn" style="padding:6px 10px;">Wide</td>
+              <td style="padding:6px 10px;color:#3a6070;">55–77</td>
+              <td style="padding:6px 10px;color:#2a4050;">Wound gap risk</td>
+            </tr>
+            <tr>
+              <td style="padding:6px 10px;color:#3a6070;">&gt; 160px</td>
+              <td class="grade-danger" style="padding:6px 10px;">Too Wide</td>
+              <td style="padding:6px 10px;color:#3a6070;">0–55</td>
+              <td style="padding:6px 10px;color:#2a4050;">Closure failure risk</td>
+            </tr>
+          </table>
+          <div style="margin-top:12px;font-size:0.7em;color:#1a3040;">
+            Pixel distances calibrated for webcam at ~25–35cm. Score peak at 90px.
+          </div>
         </div>
         """, unsafe_allow_html=True)
 
     with tab2:
         st.markdown("""
-        <div class="status-card">
-            <div style="font-size:0.85em;font-weight:600;color:#5bc4f5;margin-bottom:12px;letter-spacing:0.08em;">
-                TECHNOLOGY STACK
-            </div>
-            <div style="font-size:0.78em;color:#5a8aaa;line-height:2.2;">
-                <b style="color:#7aaac8;">Streamlit 1.x</b> — Web framework · browser UI, state management, camera widget<br>
-                <b style="color:#7aaac8;">OpenCV (cv2)</b> — Image processing · HSV masking, contour detection, annotations<br>
-                <b style="color:#7aaac8;">NumPy</b> — Pixel math · array operations on frame data<br>
-                <b style="color:#7aaac8;">Pillow (PIL)</b> — Image format conversion between OpenCV and Streamlit<br>
-                <b style="color:#7aaac8;">Python stdlib</b> — math, json, collections, datetime — no paid dependencies<br>
-            </div>
+        <div class="card" style="font-size:0.76em;line-height:2.2;color:#3a6070;">
+          <b style="color:#7aaac8;">Streamlit</b> — web framework, state management, camera widget<br>
+          <b style="color:#7aaac8;">OpenCV</b> — HSV masking, contour detection, morphology, annotation<br>
+          <b style="color:#7aaac8;">NumPy</b> — pixel array math, histogram analysis<br>
+          <b style="color:#7aaac8;">Pillow</b> — BGR→RGB conversion for Streamlit display<br>
+          <b style="color:#7aaac8;">Pandas</b> — score trend chart on History page<br>
+          <b style="color:#7aaac8;">Python stdlib</b> — math, json, collections, datetime, io
         </div>
         """, unsafe_allow_html=True)
 
     with tab3:
         st.markdown("""
-        <div class="status-card">
-            <b style="color:#5bc4f5;">V5.0</b> — Streamlit migration, multi-page nav, mask preview, dark UI<br>
-            <b style="color:#3a6a8a;">V4.0</b> — Auto-HSV 6-pass, temporal smoothing, Gradio live stream<br>
-            <b style="color:#3a6a8a;">V3.x</b> — Manual HSV, basic blob detection, static image upload<br>
+        <div class="card" style="font-size:0.76em;line-height:2.2;color:#3a6070;">
+          <b style="color:#c8dce8;">V5.1</b> — Two-mode camera (Snapshot/Live), cleaner UI, no flash/gradients<br>
+          <b style="color:#3a6070;">V5.0</b> — Streamlit migration, multi-page nav, mask preview<br>
+          <b style="color:#3a6070;">V4.0</b> — Auto-HSV 6-pass, temporal smoothing, Gradio live stream<br>
+          <b style="color:#3a6070;">V3.x</b> — Manual HSV, basic blob detection, static image upload
         </div>
         """, unsafe_allow_html=True)
 
-    st.markdown("---")
     st.markdown("""
-    <div style="text-align:center;font-size:0.65em;color:#0f2535;padding:10px 0;">
-        SUTERUP V5.0 · Surgical Suture Training Platform · Guneet Singh · Beta
+    <div style="text-align:center;font-size:0.6em;color:#0e1a24;padding:20px 0 0 0;">
+      Suterup V5.1 · Guneet Singh · Beta
     </div>
     """, unsafe_allow_html=True)
